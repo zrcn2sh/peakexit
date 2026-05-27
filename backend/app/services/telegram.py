@@ -10,10 +10,13 @@
 import os
 import logging
 import requests
+import math
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+SEOUL_TZ = ZoneInfo("Asia/Seoul")
 
 
 def _holding_currency(h: dict) -> str:
@@ -28,6 +31,21 @@ def _fmt_money_text(currency: str, amount: float, *, decimals: int = 2) -> str:
 
 def _signal_currency(signal: dict) -> str:
     return signal.get("currency") or ("USD" if signal.get("ovrs_excg_cd") else "KRW")
+
+
+def _market_status_line() -> str:
+    """한국/미국 시장 상태를 동시에 표시."""
+    now = datetime.now(SEOUL_TZ)
+    wd = now.weekday()  # mon=0 ... sun=6
+    hhmm = now.hour * 100 + now.minute
+
+    kr_open = wd < 5 and 900 <= hhmm <= 1530
+    # 미국장(KST): 23:30~24:00 (월~금) + 00:00~06:00 (화~토)
+    us_open = (wd < 5 and hhmm >= 2330) or (1 <= wd <= 5 and hhmm <= 600)
+
+    kr = "장중" if kr_open else "장외"
+    us = "장중" if us_open else "장외"
+    return f"🕒 한국장: {kr} · 미국장: {us}"
 
 
 class TelegramNotifier:
@@ -134,8 +152,13 @@ class TelegramNotifier:
     # 3. 수익률 일간 리포트
     # ─────────────────────────────────────────────────
     def notify_daily_report(self, summary: dict, holdings: list[dict], report_type: str = "close"):
-        icon = "🌅" if report_type == "open" else "🌇"
-        title = "장 시작 전 현황" if report_type == "open" else "장 마감 후 결산"
+        if isinstance(report_type, str) and report_type.startswith("hourly_"):
+            market = report_type.split("_", 1)[1].upper() if "_" in report_type else "KR"
+            icon = "⏱️"
+            title = f"{market} 시간대 수익률 현황"
+        else:
+            icon = "🌅" if report_type == "open" else "🌇"
+            title = "장 시작 전 현황" if report_type == "open" else "장 마감 후 결산"
 
         seed = summary.get("seed_money", 0)
         stocks_eval = float(summary.get("current_eval", 0))
@@ -173,11 +196,53 @@ class TelegramNotifier:
             if uak is not None:
                 unreal_note = f"\n   · 해외 미실현(원화): {(uak):+,.0f}원 (USD {_fmt_money_text('USD', unreal_usd)})"
 
-        # 보유종목 상위 5개 (수익률 순)
-        top_holdings = sorted(holdings, key=lambda h: h.get("profit_rate", 0), reverse=True)[:5]
+        def _safe_profit_rate(h: dict) -> float:
+            try:
+                v = float(h.get("profit_rate", 0) or 0)
+            except Exception:
+                return 0.0
+            return v if math.isfinite(v) else 0.0
+
+        us_holdings = [h for h in holdings if _holding_currency(h) == "USD"]
+        kr_holdings = [h for h in holdings if _holding_currency(h) != "USD"]
+
+        us_sorted = sorted(us_holdings, key=_safe_profit_rate, reverse=True)
+        kr_sorted = sorted(kr_holdings, key=_safe_profit_rate, reverse=True)
+
+        # 보유종목 상위 5개: KR/US가 같이 있으면 한쪽만 쏠리지 않도록 균형 표시
+        limit = 5
+        take_kr = min(len(kr_sorted), 3)
+        take_us = min(len(us_sorted), limit - take_kr)
+
+        # 양쪽 모두 존재하면 최소 1개씩은 보이게
+        if len(kr_sorted) > 0 and take_kr == 0:
+            take_kr = 1
+            take_us = min(len(us_sorted), limit - take_kr)
+        if len(us_sorted) > 0 and take_us == 0 and take_kr < limit:
+            take_us = 1
+
+        selected = []
+        selected.extend(kr_sorted[:take_kr])
+        selected.extend(us_sorted[:take_us])
+
+        if len(selected) < limit:
+            used_ids = set((h.get("ticker"), h.get("ovrs_excg_cd")) for h in selected)
+            candidates = []
+            for h in kr_sorted[take_kr:]:
+                key = (h.get("ticker"), h.get("ovrs_excg_cd"))
+                if key not in used_ids:
+                    candidates.append(h)
+            for h in us_sorted[take_us:]:
+                key = (h.get("ticker"), h.get("ovrs_excg_cd"))
+                if key not in used_ids:
+                    candidates.append(h)
+            candidates.sort(key=_safe_profit_rate, reverse=True)
+            selected.extend(candidates[: limit - len(selected)])
+
+        top_holdings = selected[:limit]
         holdings_text = ""
         for h in top_holdings:
-            pr = h.get("profit_rate", 0)
+            pr = _safe_profit_rate(h)
             pr_str = f"+{pr:.1f}%" if pr >= 0 else f"{pr:.1f}%"
             ccy = _holding_currency(h)
             mkt = "[미국]" if ccy == "USD" else "[국내]"
@@ -209,6 +274,7 @@ class TelegramNotifier:
         msg = (
             f"{icon} <b>{title}</b>  {datetime.now().strftime('%m/%d')}\n"
             f"{'─' * 22}\n"
+            f"{_market_status_line()}\n"
             f"💼 시드머니: {seed:,.0f}원\n"
             f"📦 총자산(시드 기준): {eval_amt:,.0f}원{eval_note}{acct_extra}\n"
             f"\n🌱 <b>시드머니 기준</b> 손익 {pnl_seed_str}원 · "

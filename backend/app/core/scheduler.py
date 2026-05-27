@@ -125,9 +125,8 @@ def send_hourly_report(market: str = "KR"):
     notifier = get_notifier()
     try:
         summary, holdings = _build_report_data()
-        # 리포트 타입은 시간대로 구분
-        report_type = "open" if _now_seoul().hour < 12 else "close"
-        notifier.notify_daily_report(summary, holdings, report_type=report_type)
+        # hourly 리포트는 open/close(장 시작 전/후) 의미가 아니라 '장중'으로 표시
+        notifier.notify_daily_report(summary, holdings, report_type=f"hourly_{market}")
         logger.info(f"[텔레그램] 시간별 리포트 발송 ({market} 장)")
     except Exception as e:
         logger.error(f"리포트 발송 실패: {e}")
