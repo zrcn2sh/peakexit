@@ -1,0 +1,41 @@
+version: '3.9'
+
+services:
+  backend:
+    build: ./backend
+    container_name: peakexit-backend
+    environment:
+      TZ: Asia/Seoul
+    expose:
+      - "8000"          # 컨테이너 내부 네트워크에서만 접근
+    env_file: .env
+    volumes:
+      - peakexit_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build: ./frontend
+    container_name: peakexit-frontend
+    expose:
+      - "80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  nginx:
+    build: ./nginx
+    container_name: peakexit-nginx
+    ports:
+      - "3000:80"       # 미니 PC의 3000번 포트로 접근
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+
+volumes:
+  peakexit_data:

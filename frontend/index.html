@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PeakExit — 자동 매도 대시보드</title>
+<style>
+  :root {
+    --bg:#0d0f14;--bg2:#141720;--bg3:#1a1e2e;
+    --accent:#00e5a0;--accent2:#0066ff;
+    --danger:#ff4b6e;--warn:#ffb800;
+    --text:#e8ecf4;--text2:#8892a4;
+    --border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.14);
+    --card-r:14px;--font:'JetBrains Mono','IBM Plex Mono',monospace;
+    --fs-base:16px;
+    --fs-sm:14px;
+    --fs-xs:13px;
+    --fs-2xs:12px;
+    --fs-metric:28px;
+    --fs-page-title:18px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{font-size:100%}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:var(--fs-base);line-height:1.45;min-height:100vh;-webkit-font-smoothing:antialiased}
+  .shell{display:grid;grid-template-columns:248px 1fr;min-height:100vh}
+
+  /* Sidebar */
+  .sidebar{background:var(--bg2);border-right:1px solid var(--border);padding:24px 0;display:flex;flex-direction:column}
+  .logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:20px}
+  .logo h1{font-size:19px;font-weight:700;letter-spacing:-0.5px;color:var(--accent)}
+  .logo span{font-size:var(--fs-xs);color:var(--text2)}
+  .nav-item{display:flex;align-items:center;gap:10px;padding:11px 20px;cursor:pointer;color:var(--text2);font-size:var(--fs-sm);border-left:2px solid transparent;transition:all .15s}
+  .nav-item svg{flex-shrink:0;width:18px;height:18px}
+  .nav-item:hover{color:var(--text);background:rgba(255,255,255,0.03)}
+  .nav-item.active{color:var(--accent);border-left-color:var(--accent);background:rgba(0,229,160,0.05)}
+  .status-pill{margin:auto 20px 0;background:rgba(0,229,160,0.1);border:1px solid rgba(0,229,160,0.25);border-radius:20px;padding:9px 15px;display:flex;align-items:center;gap:8px}
+  .status-pill .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 6px var(--accent);animation:pulse 2s ease infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .status-pill span{font-size:var(--fs-xs);color:var(--accent)}
+
+  /* Main */
+  .main{display:flex;flex-direction:column;overflow:hidden}
+  .topbar{padding:18px 28px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  .topbar .page-title{font-size:var(--fs-page-title);font-weight:600}
+  .topbar .last-check{font-size:var(--fs-xs);color:var(--text2)}
+  .btn{padding:9px 16px;border-radius:8px;border:1px solid var(--border2);background:transparent;color:var(--text);font-family:var(--font);font-size:var(--fs-sm);cursor:pointer;transition:all .15s}
+  .btn:hover{background:rgba(255,255,255,0.06)}
+  .btn.primary{background:var(--accent);color:#000;border-color:transparent;font-weight:600}
+  .btn.primary:hover{opacity:.85}
+  .btn.danger{border-color:rgba(255,75,110,0.4);color:var(--danger)}
+  .btn.danger:hover{background:rgba(255,75,110,0.08)}
+  .content{padding:24px 28px;flex:1;overflow-y:auto}
+
+  /* Metrics */
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
+  .metric-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--card-r);padding:20px 22px}
+  .metric-card .label{font-size:var(--fs-xs);color:var(--text2);margin-bottom:8px;letter-spacing:.5px;text-transform:uppercase}
+  .metric-card .value{font-size:var(--fs-metric);font-weight:700;letter-spacing:-0.5px}
+  .metric-card .sub{font-size:var(--fs-xs);color:var(--text2);margin-top:6px;line-height:1.4}
+  .up{color:var(--accent)}.down{color:var(--danger)}.neutral{color:var(--text)}
+
+  .summary-bases{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:22px}
+  .base-col{background:var(--bg3);border:1px solid var(--border);border-radius:var(--card-r);padding:14px 18px}
+  .base-title{font-size:var(--fs-xs);color:var(--warn);font-weight:700;margin-bottom:10px;letter-spacing:.2px}
+  .base-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:var(--fs-sm);margin-top:8px}
+  .base-row span:first-child{color:var(--text2);flex-shrink:0}
+  .base-row .base-val{font-weight:700;font-size:15px;text-align:right}
+
+  /* Section */
+  .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .section-head h2{font-size:16px;font-weight:600;letter-spacing:.3px}
+
+  /* Table */
+  .holdings-table,.atr-table{width:100%;border-collapse:collapse}
+  .holdings-table th,.atr-table th{text-align:left;font-size:var(--fs-2xs);color:var(--text2);padding:0 12px 11px;font-weight:500;letter-spacing:.6px;text-transform:uppercase;border-bottom:1px solid var(--border)}
+  .holdings-table td,.atr-table td{padding:14px 12px;border-bottom:1px solid var(--border);font-size:var(--fs-sm);vertical-align:middle}
+  .holdings-table tr:hover td,.atr-table tr:hover td{background:rgba(255,255,255,0.02)}
+  .ticker-badge{background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px 9px;font-size:var(--fs-xs);font-weight:700;letter-spacing:.5px;color:var(--accent2)}
+  .signal-badge{display:inline-flex;align-items:center;gap:5px;border-radius:20px;padding:4px 11px;font-size:var(--fs-2xs);font-weight:600}
+  .signal-sell{background:rgba(255,75,110,0.12);color:var(--danger);border:1px solid rgba(255,75,110,0.25)}
+  .signal-trail{background:rgba(255,184,0,0.12);color:var(--warn);border:1px solid rgba(255,184,0,0.25)}
+  .signal-hold{background:rgba(0,229,160,0.08);color:var(--accent);border:1px solid rgba(0,229,160,0.2)}
+  .progress-bar{height:5px;border-radius:2px;background:var(--bg3);overflow:hidden;margin-top:5px}
+  .progress-fill{height:100%;border-radius:2px;transition:width .4s}
+
+  /* Panel */
+  .panel{background:var(--bg2);border:1px solid var(--border);border-radius:var(--card-r);padding:22px}
+  .panel h2{font-size:16px;font-weight:600;margin-bottom:16px}
+
+  /* Settings */
+  .settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .field{display:flex;flex-direction:column;gap:6px}
+  .field label{font-size:var(--fs-2xs);color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+  .field input{background:var(--bg3);border:1px solid var(--border2);border-radius:8px;color:var(--text);font-family:var(--font);font-size:var(--fs-base);padding:10px 12px;width:100%;outline:none;transition:border-color .15s}
+  .field input:focus{border-color:var(--accent)}
+  .field .hint{font-size:var(--fs-2xs);color:var(--text2)}
+  .field .atr-badge{font-size:var(--fs-2xs);color:var(--warn);background:rgba(255,184,0,0.1);border:1px solid rgba(255,184,0,0.2);border-radius:4px;padding:3px 7px;display:inline-block;margin-top:2px}
+  .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-top:1px solid var(--border);margin-top:12px}
+  .toggle{position:relative;width:38px;height:20px;cursor:pointer}
+  .toggle input{display:none}
+  .toggle-track{position:absolute;inset:0;border-radius:20px;background:var(--bg3);border:1px solid var(--border2);transition:.2s}
+  .toggle input:checked+.toggle-track{background:var(--accent);border-color:var(--accent)}
+  .toggle-thumb{position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:var(--text2);transition:.2s}
+  .toggle input:checked~.toggle-thumb{left:21px;background:#000}
+
+  /* Log */
+  .log-item{padding:10px 0;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:4px}
+  .log-item:last-child{border-bottom:none}
+  .log-head{display:flex;justify-content:space-between;align-items:center}
+  .log-name{font-size:var(--fs-sm);font-weight:600}
+  .log-time{font-size:var(--fs-2xs);color:var(--text2)}
+  .log-reason{font-size:var(--fs-xs);color:var(--text2)}
+
+  /* ATR 신뢰도 */
+  .conf-high{color:var(--accent)}
+  .conf-medium{color:var(--warn)}
+  .conf-low{color:var(--danger)}
+
+  /* 텔레그램 명령어 */
+  .cmd-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:4px}
+  .cmd-item{background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:6px}
+  .cmd-name{font-size:15px;font-weight:700;color:var(--accent2)}
+  .cmd-desc{font-size:var(--fs-xs);color:var(--text2);line-height:1.55}
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="logo">
+      <h1>PeakExit</h1>
+      <span>자동 매도 시스템 v1.0</span>
+    </div>
+    <div class="nav-item active" onclick="showTab('dashboard')">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      대시보드
+    </div>
+    <div class="nav-item" onclick="showTab('settings')">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+      매도 조건 설정
+    </div>
+    <div class="nav-item" onclick="showTab('atr')">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      ATR 트레일링
+    </div>
+    <div class="nav-item" onclick="showTab('log')">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      매도 이력
+    </div>
+    <div class="nav-item" onclick="showTab('telegram')">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      텔레그램 명령어
+    </div>
+    <div class="status-pill">
+      <div class="dot"></div>
+      <span>모니터링 중</span>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <span class="page-title" id="pageTitle">보유 종목 현황</span>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="last-check" id="lastCheck">마지막 체크: —</span>
+        <button class="btn" onclick="loadData()">↻ 새로고침</button>
+        <button class="btn primary" onclick="runCheck()">즉시 체크</button>
+      </div>
+    </div>
+
+    <!-- 대시보드 -->
+    <div class="content" id="tab-dashboard">
+      <div class="metrics">
+        <div class="metric-card"><div class="label">시드머니</div><div class="value neutral" id="m-seed">—</div><div class="sub">기준 금액</div></div>
+        <div class="metric-card"><div class="label" id="m-eval-label">현재 평가금액</div><div class="value" id="m-eval">—</div><div class="sub" id="m-pnl">평가손익</div></div>
+        <div class="metric-card"><div class="label">총 수익률</div><div class="value" id="m-rate">—</div><div class="sub" id="m-rate-sub">시드머니 기준 (아래와 동일)</div></div>
+        <div class="metric-card"><div class="label">보유 종목수</div><div class="value neutral" id="m-count">—</div><div class="sub">매도신호 <span id="m-signals" class="down">0</span></div></div>
+      </div>
+      <div class="summary-bases" id="summaryBases">
+        <div class="base-col">
+          <div class="base-title">시드머니 기준</div>
+          <div class="base-row"><span>대비 손익</span><span class="base-val" id="sb-seed-pnl">—</span></div>
+          <div class="base-row"><span>수익률</span><span class="base-val" id="sb-seed-rate">—</span></div>
+        </div>
+        <div class="base-col">
+          <div class="base-title">현재 보유(매입원가) 기준</div>
+          <div class="base-row"><span>총 매입원가</span><span class="base-val" id="sb-cost-basis">—</span></div>
+          <div class="base-row"><span>평가손익</span><span class="base-val" id="sb-cost-pnl">—</span></div>
+          <div class="base-row"><span>수익률</span><span class="base-val" id="sb-cost-rate">—</span></div>
+        </div>
+      </div>
+      <div class="section-head">
+        <h2>보유 종목</h2>
+        <span style="font-size:var(--fs-xs);color:var(--text2)">5분마다 자동 검사</span>
+      </div>
+      <table class="holdings-table">
+        <thead>
+          <tr>
+            <th>종목</th><th>수량</th><th>평균단가</th><th>현재가</th>
+            <th>수익률</th><th>고점 대비</th><th>트레일링(ATR)</th><th>신호</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="holdingsBody">
+          <tr><td colspan="9" style="text-align:center;color:var(--text2);padding:40px">데이터 로딩중…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 설정 -->
+    <div class="content" id="tab-settings" style="display:none">
+      <div class="panel">
+        <h2>⚙ 매도 조건 설정</h2>
+        <div class="settings-grid">
+          <div class="field">
+            <label>손절 기준 (%)</label>
+            <input type="number" id="s-stoploss" placeholder="-10" step="0.5"/>
+            <span class="hint">수익률이 이 값 이하면 즉시 매도</span>
+          </div>
+          <div class="field">
+            <label>목표가 (%)</label>
+            <input type="number" id="s-takeprofit" placeholder="비활성 (빈칸)" step="0.5"/>
+            <span class="hint">설정 시 도달하면 즉시 매도</span>
+          </div>
+          <div class="field">
+            <label>트레일링 발동 수익률 (%) — 폴백</label>
+            <input type="number" id="s-trigger" placeholder="5" step="0.5"/>
+            <span class="hint">ATR 계산 실패 시 사용되는 기본값</span>
+            <span class="atr-badge" id="atr-trigger-info">ATR 자동계산 우선 적용</span>
+          </div>
+          <div class="field">
+            <label>트레일링 하락폭 (%) — 폴백</label>
+            <input type="number" id="s-drop" placeholder="5" step="0.5"/>
+            <span class="hint">ATR 계산 실패 시 사용되는 기본값</span>
+            <span class="atr-badge" id="atr-drop-info">ATR 자동계산 우선 적용</span>
+          </div>
+          <div class="field">
+            <label>시드머니 (원)</label>
+            <input type="number" id="s-seed" placeholder="1000000" step="10000"/>
+          </div>
+          <div class="field">
+            <label>체크 주기 (분)</label>
+            <input type="number" id="s-interval" placeholder="5" min="1" max="60"/>
+          </div>
+        </div>
+        <div class="toggle-row">
+          <span style="font-size:var(--fs-sm)">자동 매도 활성화</span>
+          <label class="toggle">
+            <input type="checkbox" id="s-enabled" checked/>
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+        <div style="margin-top:16px;display:flex;gap:10px">
+          <button class="btn primary" onclick="saveSettings()">저장</button>
+          <button class="btn" onclick="loadSettings()">초기화</button>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:18px">
+        <h2>📐 매도 로직 설명</h2>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-top:4px">
+          <div style="background:rgba(255,75,110,0.07);border:1px solid rgba(255,75,110,0.2);border-radius:10px;padding:14px">
+            <div style="font-size:var(--fs-xs);color:var(--danger);font-weight:700;margin-bottom:6px">① 손절 (Stop Loss)</div>
+            <div style="font-size:var(--fs-xs);color:var(--text2);line-height:1.7">수익률이 설정값 이하로 떨어지면 <b style="color:var(--text)">즉시 시장가 매도</b>.</div>
+          </div>
+          <div style="background:rgba(255,184,0,0.07);border:1px solid rgba(255,184,0,0.2);border-radius:10px;padding:14px">
+            <div style="font-size:var(--fs-xs);color:var(--warn);font-weight:700;margin-bottom:6px">② 트레일링 스탑 ("어깨")</div>
+            <div style="font-size:var(--fs-xs);color:var(--text2);line-height:1.7"><b style="color:var(--warn)">ATR 자동 계산 우선</b> → 실패 시 폴백값 사용. 고점 대비 N% 하락 시 매도.</div>
+          </div>
+          <div style="background:rgba(0,229,160,0.07);border:1px solid rgba(0,229,160,0.2);border-radius:10px;padding:14px">
+            <div style="font-size:var(--fs-xs);color:var(--accent);font-weight:700;margin-bottom:6px">③ 목표가 (Take Profit)</div>
+            <div style="font-size:var(--fs-xs);color:var(--text2);line-height:1.7">설정한 수익률 <b style="color:var(--text)">즉시 전량 매도</b>. 선택 항목.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ATR 트레일링 -->
+    <div class="content" id="tab-atr" style="display:none">
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <h2>📊 종목별 ATR 트레일링 설정</h2>
+          <button class="btn primary" onclick="refreshTrailing()">↻ ATR 갱신</button>
+        </div>
+        <div style="font-size:var(--fs-xs);color:var(--text2);margin-bottom:16px;line-height:1.8;padding:12px;background:var(--bg3);border-radius:8px">
+          🟢 <b>high</b> = ATR 데이터 기반 자동 계산 &nbsp;|&nbsp;
+          🟡 <b>medium</b> = 부분 데이터 &nbsp;|&nbsp;
+          🔴 <b>low</b> = 분류 기본값(폴백) 적용<br>
+          트레일링 하락폭: <b>ATR(14일) × 분류별 배수</b> → 상한/하한 범위 내 클램프
+        </div>
+        <table class="atr-table">
+          <thead>
+            <tr>
+              <th>종목</th><th>분류</th><th>시장</th>
+              <th>ATR(%)</th><th>트레일링 발동</th><th>트레일링 하락폭</th>
+              <th>신뢰도</th><th>계산 근거</th><th>갱신일시</th>
+            </tr>
+          </thead>
+          <tbody id="atrBody">
+            <tr><td colspan="9" style="text-align:center;color:var(--text2);padding:30px">로딩중…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 매도 이력 -->
+    <div class="content" id="tab-log" style="display:none">
+      <div class="panel">
+        <h2>📋 매도 이력</h2>
+        <div id="logList"><div style="color:var(--text2);text-align:center;padding:30px">매도 이력 없음</div></div>
+      </div>
+    </div>
+
+    <!-- 텔레그램 명령어 -->
+    <div class="content" id="tab-telegram" style="display:none">
+      <div class="panel">
+        <h2>📱 텔레그램 봇 명령어</h2>
+        <div style="font-size:var(--fs-xs);color:var(--text2);margin-bottom:16px;line-height:1.8;padding:12px;background:var(--bg3);border-radius:8px">
+          텔레그램에서 봇에게 직접 명령어를 입력하면 즉시 응답합니다.<br>
+          매도 신호/결과/리포트는 자동으로 전송됩니다.
+        </div>
+        <div class="cmd-grid">
+          <div class="cmd-item">
+            <div class="cmd-name">/holdings</div>
+            <div class="cmd-desc">현재 보유종목 전체 현황<br>수익률 + 고점대비 + 트레일링 비율 + 매도신호 표시</div>
+          </div>
+          <div class="cmd-item">
+            <div class="cmd-name">/summary</div>
+            <div class="cmd-desc">포트폴리오 수익 요약<br>시드머니 기준·보유(매입원가) 기준 수익률·손익 + 추정 자산</div>
+          </div>
+          <div class="cmd-item">
+            <div class="cmd-name">/overview · /현황</div>
+            <div class="cmd-desc">수동 전체 현황<br>/summary 와 /holdings 를 잔고 1회 조회로 연속 발송 (텔레그램 2통)</div>
+          </div>
+          <div class="cmd-item">
+            <div class="cmd-name">/atr</div>
+            <div class="cmd-desc">종목별 ATR 트레일링 설정 조회<br>ATR% + 트레일링 하락폭 + 신뢰도 확인</div>
+          </div>
+          <div class="cmd-item">
+            <div class="cmd-name">/status</div>
+            <div class="cmd-desc">시스템 상태 확인<br>자동매도 활성화 여부 + 투자모드 + 현재 설정값</div>
+          </div>
+          <div class="cmd-item">
+            <div class="cmd-name">/check</div>
+            <div class="cmd-desc">즉시 매도 검사 실행<br>스케줄 무시하고 지금 바로 전종목 검사</div>
+          </div>
+          <div class="cmd-item">
+            <div class="cmd-name">/help</div>
+            <div class="cmd-desc">도움말 표시<br>전체 명령어 목록 안내</div>
+          </div>
+        </div>
+
+        <div style="margin-top:20px">
+          <h2 style="margin-bottom:12px">🔔 자동 발송 알림</h2>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="cmd-item">
+              <div class="cmd-name" style="color:var(--danger)">매도 신호 감지</div>
+              <div class="cmd-desc">손절/트레일링/목표가 조건 충족 시 실행 전 예고 발송</div>
+            </div>
+            <div class="cmd-item">
+              <div class="cmd-name" style="color:var(--accent)">매도 실행 결과</div>
+              <div class="cmd-desc">매도 주문 성공/실패 결과 즉시 발송</div>
+            </div>
+            <div class="cmd-item">
+              <div class="cmd-name" style="color:var(--warn)">수익률 리포트</div>
+              <div class="cmd-desc">한국장 09~15시 / 미국장 23~06시 매시간 정각 자동 발송</div>
+            </div>
+            <div class="cmd-item">
+              <div class="cmd-name" style="color:var(--accent2)">ATR 갱신 결과</div>
+              <div class="cmd-desc">매주 월요일 08:50 종목별 트레일링 비율 갱신 후 발송</div>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:16px;display:flex;gap:10px">
+          <button class="btn primary" onclick="testTelegram()">📨 연결 테스트</button>
+          <button class="btn" onclick="sendReportNow()">📊 리포트 즉시 발송</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const API = '/api';
+
+/** 직전에 성공적으로 받은 데이터 (무효 응답 시 화면 유지) */
+let _lastSummary = null;
+let _lastHoldings = null;
+let _loadInFlight = false;
+let _loadQueued = false;
+let _loadGen = 0;
+
+function validSummary(s) {
+  if (!s || typeof s !== 'object') return false;
+  for (const k of ['seed_money', 'current_eval', 'unrealized_pnl', 'total_return_pct', 'holdings_count']) {
+    const v = Number(s[k]);
+    if (!Number.isFinite(v)) return false;
+  }
+  const netw = Number(s.total_net_worth_krw);
+  if (s.total_net_worth_krw != null && !Number.isFinite(netw)) return false;
+  return true;
+}
+
+function validHoldings(arr) {
+  if (!Array.isArray(arr)) return false;
+  for (const h of arr) {
+    if (!h || typeof h !== 'object') return false;
+    if (typeof h.ticker !== 'string') return false;
+    if (!Number.isFinite(Number(h.quantity))) return false;
+  }
+  return true;
+}
+
+function showTab(tab) {
+  ['dashboard','settings','atr','log','telegram'].forEach(t => {
+    document.getElementById('tab-'+t).style.display = t===tab?'':'none';
+  });
+  const titles = {
+    dashboard:'보유 종목 현황', settings:'매도 조건 설정',
+    atr:'ATR 트레일링 설정', log:'매도 이력', telegram:'텔레그램 명령어'
+  };
+  document.getElementById('pageTitle').textContent = titles[tab];
+  document.querySelectorAll('.nav-item').forEach((el,i) => {
+    el.classList.toggle('active', ['dashboard','settings','atr','log','telegram'][i]===tab);
+  });
+  if (tab==='log') loadLog();
+  if (tab==='settings') loadSettings();
+  if (tab==='atr') loadAtr();
+}
+
+async function loadData() {
+  if (_loadInFlight) {
+    _loadQueued = true;
+    return;
+  }
+  _loadInFlight = true;
+  const gen = ++_loadGen;
+  const lc = document.getElementById('lastCheck');
+  if (lc) lc.textContent = '불러오는 중…';
+
+  try {
+    let holdings = null;
+    let summary = null;
+    let ok = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await fetch(API + '/stocks/dashboard');
+      if (gen !== _loadGen) return;
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (gen !== _loadGen) return;
+      holdings = data.holdings;
+      summary = data.summary;
+      const cnt = Number(summary && summary.holdings_count);
+      const len = Array.isArray(holdings) ? holdings.length : -1;
+      const aligned = validSummary(summary) && validHoldings(holdings) && cnt === len;
+      if (aligned) {
+        ok = true;
+        break;
+      }
+      console.warn('대시보드 스냅샷 검증 실패·건수 불일치 — 재조회', { attempt: attempt + 1, holdings_count: cnt, rows: len });
+      if (attempt < 2) await new Promise(r => setTimeout(r, 700));
+    }
+
+    if (!ok) {
+      console.warn('대시보드 3회 후에도 불완전 — 이전 화면 유지', summary, holdings);
+      if (lc) {
+        lc.textContent = _lastSummary
+          ? '갱신 스킵(건수 불일치 등) · ' + new Date().toLocaleTimeString('ko-KR')
+          : '데이터 오류 · ' + new Date().toLocaleTimeString('ko-KR');
+      }
+      if (_lastSummary) renderMetrics(_lastSummary);
+      if (_lastHoldings) renderHoldings(_lastHoldings);
+      return;
+    }
+
+    _lastSummary = summary;
+    _lastHoldings = holdings;
+    renderMetrics(summary);
+    renderHoldings(holdings);
+    if (lc) lc.textContent = '마지막 체크: ' + new Date().toLocaleTimeString('ko-KR');
+  } catch (e) {
+    console.error(e);
+    if (lc) {
+      lc.textContent = _lastSummary
+        ? '일시 오류(이전 데이터 유지) · ' + new Date().toLocaleTimeString('ko-KR')
+        : '로드 실패 · ' + new Date().toLocaleTimeString('ko-KR');
+    }
+    if (_lastSummary) renderMetrics(_lastSummary);
+    if (_lastHoldings) renderHoldings(_lastHoldings);
+  } finally {
+    _loadInFlight = false;
+    if (_loadQueued) {
+      _loadQueued = false;
+      loadData();
+    }
+  }
+}
+
+function fmt(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return '—';
+  return Math.round(x).toLocaleString('ko-KR', { maximumFractionDigits: 0 });
+}
+function fmtPct(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return '—';
+  return (x >= 0 ? '+' : '') + Math.round(x) + '%';
+}
+function fmtCur(h, n) {
+  if (n == null || n === '') return '—';
+  const x = Number(n);
+  if (!Number.isFinite(x)) return '—';
+  if (h.currency === 'USD')
+    return '$' + Math.round(x).toLocaleString('en-US', { maximumFractionDigits: 0, minimumFractionDigits: 0 });
+  return fmt(x) + '원';
+}
+
+function renderMetrics(s) {
+  if (!s || !validSummary(s)) return;
+  document.getElementById('m-seed').textContent = fmt(s.seed_money)+'원';
+  const useCashBasis = s.seed_basis_includes_cash && Number.isFinite(Number(s.total_net_worth_krw));
+  const displayEval = useCashBasis ? Number(s.total_net_worth_krw) : Number(s.current_eval);
+  const elEvalLabel = document.getElementById('m-eval-label');
+  if (elEvalLabel) elEvalLabel.textContent = useCashBasis ? '추정 총자산' : '현재 평가금액';
+  const ev = document.getElementById('m-eval');
+  ev.textContent = fmt(displayEval)+'원';
+  let evTitle = '';
+  if (useCashBasis) {
+    evTitle = 'KIS 국내 잔고 output2(순자산/총평가) + 해외주식 원화환산. 주식만: '+fmt(s.current_eval)+'원';
+    const cd = Number(s.cash_deposit_krw);
+    if (Number.isFinite(cd) && cd > 0) evTitle += ' · 예수금(dnca_tot_amt): '+fmt(cd)+'원';
+  } else if (s.fx_includes_usd && Number.isFinite(Number(s.usd_krw_rate))) {
+    const usdEval = Number(s.current_eval_usd);
+    const usdStr = Number.isFinite(usdEval) ? Math.round(usdEval).toLocaleString('en-US') : '?';
+    evTitle = '국내 '+fmt(s.current_eval_krw_domestic||0)+'원 + 해외 USD '+usdStr+' (× '+Math.round(Number(s.usd_krw_rate))+'원/$)';
+  } else if (s.fx_usd_excluded_from_krw_totals)
+    evTitle = '해외(USD)는 환율 미조회로 합계에서 제외됨. FX_USD_KRW 로 수동 입력 가능';
+  ev.title = evTitle;
+  ev.className = 'value '+(Number(s.unrealized_pnl) >= 0 ? 'up' : 'down');
+  let pnlLine = '평가손익 '+(Number(s.unrealized_pnl) >= 0 ? '+' : '')+fmt(s.unrealized_pnl)+'원';
+  if (s.fx_includes_usd && Number.isFinite(Number(s.usd_krw_rate)))
+    pnlLine += ' (환율 '+Math.round(Number(s.usd_krw_rate))+'원/$)';
+  const cd = Number(s.cash_deposit_krw);
+  if (Number.isFinite(cd) && cd > 0)
+    pnlLine += '\n예수금(추정) '+fmt(cd)+'원';
+  document.getElementById('m-pnl').textContent = pnlLine;
+  const re = document.getElementById('m-rate');
+  const seedR = Number(s.return_pct_on_seed ?? s.total_return_pct);
+  re.textContent = fmtPct(seedR);
+  re.className = 'value '+(seedR >= 0 ? 'up' : 'down');
+  document.getElementById('m-rate-sub').textContent = '시드머니 기준 (상세는 아래)';
+  document.getElementById('m-count').textContent = s.holdings_count+'개';
+
+  const pvs = Number(s.pnl_vs_seed_krw);
+  const elSpnl = document.getElementById('sb-seed-pnl');
+  const elSrate = document.getElementById('sb-seed-rate');
+  const elCb = document.getElementById('sb-cost-basis');
+  const elCpnl = document.getElementById('sb-cost-pnl');
+  const elCrate = document.getElementById('sb-cost-rate');
+  if (elSpnl) {
+    elSpnl.textContent = (pvs >= 0 ? '+' : '') + fmt(pvs) + '원';
+    elSpnl.className = 'base-val ' + (pvs >= 0 ? 'up' : 'down');
+  }
+  if (elSrate) {
+    elSrate.textContent = fmtPct(seedR);
+    elSrate.className = 'base-val ' + (seedR >= 0 ? 'up' : 'down');
+  }
+  const tp = Number(s.total_purchase);
+  const ur = Number(s.unrealized_pnl);
+  const costR = Number(s.return_pct_on_holdings_cost ?? s.return_on_cost_pct);
+  if (elCb) elCb.textContent = fmt(tp) + '원';
+  if (elCpnl) {
+    elCpnl.textContent = (ur >= 0 ? '+' : '') + fmt(ur) + '원';
+    elCpnl.className = 'base-val ' + (ur >= 0 ? 'up' : 'down');
+  }
+  if (elCrate) {
+    elCrate.textContent = fmtPct(costR);
+    elCrate.className = 'base-val ' + (costR >= 0 ? 'up' : 'down');
+  }
+}
+
+function renderHoldings(holdings) {
+  if (!Array.isArray(holdings) || !validHoldings(holdings)) return;
+  const tbody = document.getElementById('holdingsBody');
+  const signals = holdings.filter(h=>h.should_sell).length;
+  document.getElementById('m-signals').textContent = signals;
+  if (!holdings.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text2);padding:40px">보유 종목 없음</td></tr>';
+    return;
+  }
+  tbody.innerHTML = holdings.map(h => {
+    if (h.error) {
+      return `<tr><td colspan="9" style="color:var(--warn);font-size:var(--fs-sm);padding:14px">
+        ⚠ ${h.ticker} ${h.name||''} — 분석 실패: ${h.error} (잔고 수량 ${h.quantity||0}주)
+      </td></tr>`;
+    }
+    const p = Number(h.profit_rate) || 0;
+    const pColor = p>=0?'var(--accent)':'var(--danger)';
+    const peak = h.peak_info||{};
+    const dropPct = peak.drop_from_peak_pct||0;
+    const dropColor = dropPct<=-3?'var(--danger)':dropPct<=-1?'var(--warn)':'var(--text2)';
+    const tc = h.trailing_config||{};
+    const trailDrop = tc.trailing_drop_pct != null ? fmt(tc.trailing_drop_pct) + '%' : '—';
+    const confIcon = tc.confidence==='high'?'🟢':tc.confidence==='medium'?'🟡':'🔴';
+    const srcLabel = tc.source==='atr_auto'?'ATR':'폴백';
+    const atrPct = tc.atr_pct != null ? fmt(tc.atr_pct) + '%' : '—';
+    let sigHtml = h.sell_signal
+      ? `<span class="signal-badge ${h.sell_signal.reason==='STOP_LOSS'?'signal-sell':'signal-trail'}">${h.sell_signal.reason==='STOP_LOSS'?'🔴 손절':'🟡 트레일링'}</span>`
+      : `<span class="signal-badge signal-hold">✓ 보유</span>`;
+    const pBarW = Math.min(Math.abs(p),50)*2;
+    return `<tr>
+      <td><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="ticker-badge">${h.ticker}</span><span>${h.name}</span>${h.currency==='USD' ? '<span style="font-size:var(--fs-2xs);color:var(--warn);font-weight:600">USD</span>' : ''}</div></td>
+      <td>${fmt(h.quantity)}주</td>
+      <td>${fmtCur(h, h.avg_price)}</td>
+      <td style="font-weight:600">${fmtCur(h, h.current_price)}</td>
+      <td>
+        <div style="color:${pColor};font-weight:600">${fmtPct(p)}</div>
+        <div class="progress-bar"><div class="progress-fill" style="width:${pBarW}%;background:${pColor}"></div></div>
+      </td>
+      <td style="color:${dropColor};font-size:var(--fs-sm)">${peak.peak_price ? fmtCur(h, peak.peak_price)+'<br>'+fmtPct(dropPct):'—'}</td>
+      <td style="font-size:var(--fs-xs)">
+        <div style="font-weight:600;color:var(--warn)">${confIcon} ${trailDrop}</div>
+        <div style="color:var(--text2);font-size:var(--fs-2xs)">${srcLabel} | ATR ${atrPct}</div>
+      </td>
+      <td>${sigHtml}</td>
+      <td><button class="btn danger" style="font-size:var(--fs-xs);padding:6px 12px" onclick="manualSell('${h.ticker}','${h.name}')">수동매도</button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadAtr() {
+  try {
+    const configs = await fetch(API+'/stocks/trailing-configs').then(r=>r.json());
+    const tbody = document.getElementById('atrBody');
+    const entries = Object.entries(configs);
+    if (!entries.length) {
+      tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text2);padding:30px">ATR 데이터 없음 — 대시보드 접속 시 자동 계산됩니다</td></tr>';
+      return;
+    }
+    tbody.innerHTML = entries.map(([ticker, c]) => {
+      const cl = c.classification||{};
+      const confClass = c.confidence==='high'?'conf-high':c.confidence==='medium'?'conf-medium':'conf-low';
+      const confLabel = c.confidence==='high'?'🟢 high':c.confidence==='medium'?'🟡 medium':'🔴 폴백';
+      const updated = c.updated_at?new Date(c.updated_at).toLocaleString('ko-KR'):'—';
+      return `<tr>
+        <td><span class="ticker-badge">${ticker}</span></td>
+        <td>${cl.size||'—'}</td>
+        <td>${cl.market_region||'—'}</td>
+        <td style="color:var(--warn);font-weight:600">${c.atr_pct != null && c.atr_pct !== '' ? fmt(Number(c.atr_pct)) + '%' : '—'}</td>
+        <td>${c.trailing_trigger_pct != null && c.trailing_trigger_pct !== '' ? fmt(Number(c.trailing_trigger_pct)) + '%' : '—'}</td>
+        <td style="color:var(--accent);font-weight:600">${c.trailing_drop_pct != null && c.trailing_drop_pct !== '' ? fmt(Number(c.trailing_drop_pct)) + '%' : '—'}</td>
+        <td class="${confClass}">${confLabel}</td>
+        <td style="font-size:var(--fs-2xs);color:var(--text2);max-width:260px">${c.reason||'—'}</td>
+        <td style="font-size:var(--fs-2xs);color:var(--text2)">${updated}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function refreshTrailing() {
+  try {
+    await fetch(API+'/stocks/refresh-trailing',{method:'POST'});
+    setTimeout(loadAtr, 2000);
+    alert('ATR 갱신 요청 완료. 잠시 후 반영됩니다.');
+  } catch(e) { alert('갱신 실패: '+e.message); }
+}
+
+function getKstClock() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Seoul',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(new Date());
+  const get = t => parts.find(p => p.type === t)?.value || '';
+  const wdMap = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 0 };
+  const wd = wdMap[get('weekday')] ?? 0;
+  const hh = Number(get('hour') || 0);
+  const mm = Number(get('minute') || 0);
+  return { weekday: wd, hhmm: hh * 100 + mm };
+}
+
+function holdingMarketRegion(holding) {
+  if (!holding || typeof holding !== 'object') return 'KR';
+  const m = String(holding.market || '').toUpperCase();
+  if (
+    holding.currency === 'USD' || holding.ovrs_excg_cd ||
+    m === 'NASDAQ' || m === 'NYSE' || m === 'AMEX' || m === 'NAS' || m === 'NYS' || m === 'AMS' || m === 'NASD'
+  ) return 'US';
+  return 'KR';
+}
+
+function isMarketOpenKst(region) {
+  const { weekday, hhmm } = getKstClock();
+  if (region === 'KR') {
+    if (weekday === 0 || weekday === 6) return false;
+    return hhmm >= 900 && hhmm <= 1530;
+  }
+  // 미국장(KST): 23:30~24:00 (월~금) + 00:00~06:00 (화~토)
+  if (hhmm >= 2330) return weekday >= 1 && weekday <= 5;
+  if (hhmm <= 600) return weekday >= 2 && weekday <= 6;
+  return false;
+}
+
+async function manualSell(ticker, name) {
+  const holding = Array.isArray(_lastHoldings) ? _lastHoldings.find(h => h.ticker === ticker) : null;
+  const region = holdingMarketRegion(holding);
+  if (!isMarketOpenKst(region)) {
+    const session = region === 'US' ? '미국장' : '한국장';
+    alert(`현재 ${session} 장중이 아니어서 수동 매도를 진행할 수 없습니다.`);
+    return;
+  }
+  if (!confirm(`${name}(${ticker})을 즉시 전량 매도하시겠습니까?`)) return;
+  try {
+    const r = await fetch(API+'/stocks/manual-sell/'+ticker,{method:'POST'}).then(r=>r.json());
+    alert(r.message||'매도 완료'); loadData();
+  } catch(e) { alert('매도 실패: '+e.message); }
+}
+
+async function runCheck() {
+  try {
+    await fetch(API+'/stocks/run-check',{method:'POST'});
+    await loadData(); alert('매도 검사 완료');
+  } catch(e) { alert('실행 실패: '+e.message); }
+}
+
+async function loadSettings() {
+  try {
+    const s = await fetch(API+'/settings/').then(r=>r.json());
+    document.getElementById('s-stoploss').value = s.stop_loss_pct??-10;
+    document.getElementById('s-takeprofit').value = s.take_profit_pct??'';
+    document.getElementById('s-trigger').value = s.trailing_trigger_pct??5;
+    document.getElementById('s-drop').value = s.trailing_drop_pct??5;
+    document.getElementById('s-seed').value = s.seed_money??1000000;
+    document.getElementById('s-interval').value = s.check_interval_minutes??5;
+    document.getElementById('s-enabled').checked = s.enabled!==false;
+
+    // ATR 뱃지에 현재 폴백값 표시
+    document.getElementById('atr-trigger-info').textContent =
+      `ATR 우선 | 폴백: ${s.trailing_trigger_pct??5}%`;
+    document.getElementById('atr-drop-info').textContent =
+      `ATR 우선 | 폴백: ${s.trailing_drop_pct??5}%`;
+  } catch(e) {}
+}
+
+async function saveSettings() {
+  const tp = document.getElementById('s-takeprofit').value;
+  const body = {
+    stop_loss_pct: parseFloat(document.getElementById('s-stoploss').value)||-10,
+    take_profit_pct: tp!==''?parseFloat(tp):null,
+    trailing_trigger_pct: parseFloat(document.getElementById('s-trigger').value)||5,
+    trailing_drop_pct: parseFloat(document.getElementById('s-drop').value)||5,
+    seed_money: parseFloat(document.getElementById('s-seed').value)||1000000,
+    check_interval_minutes: parseInt(document.getElementById('s-interval').value)||5,
+    enabled: document.getElementById('s-enabled').checked,
+  };
+  try {
+    await fetch(API+'/settings/',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    alert('설정 저장 완료');
+    loadSettings();
+  } catch(e) { alert('저장 실패: '+e.message); }
+}
+
+async function loadLog() {
+  try {
+    const logs = await fetch(API+'/portfolio/sell-log').then(r=>r.json());
+    const el = document.getElementById('logList');
+    if (!logs.length) { el.innerHTML = '<div style="color:var(--text2);text-align:center;padding:30px">매도 이력 없음</div>'; return; }
+    el.innerHTML = logs.map(l => {
+      const pColor = (l.profit_rate||0)>=0?'var(--accent)':'var(--danger)';
+      const time = l.checked_at?new Date(l.checked_at).toLocaleString('ko-KR'):'';
+      return `<div class="log-item">
+        <div class="log-head">
+          <span class="log-name">${l.name} <span class="ticker-badge" style="font-size:var(--fs-2xs)">${l.ticker}</span></span>
+          <span class="log-time">${time}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span class="log-reason">${l.reason_label||l.reason} · ${fmt(l.quantity)}주 · ${fmt(l.current_price||0)}원</span>
+          <span style="color:${pColor}">${fmtPct(l.profit_rate||0)}</span>
+        </div>
+        ${l.success===false?`<div style="font-size:var(--fs-2xs);color:var(--danger)">⚠ 실패: ${l.error}</div>`:''}
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function testTelegram() {
+  try {
+    const r = await fetch(API+'/telegram/test',{method:'POST'}).then(r=>r.json());
+    alert(r.success?'✅ 텔레그램 연결 성공!':'❌ 연결 실패. 봇 설정을 확인하세요.');
+  } catch(e) { alert('테스트 실패: '+e.message); }
+}
+
+async function sendReportNow() {
+  try {
+    await fetch(API+'/telegram/report/now',{method:'POST'});
+    alert('📊 리포트 발송 완료');
+  } catch(e) { alert('발송 실패: '+e.message); }
+}
+
+loadData();
+setInterval(loadData, 60000);
+</script>
+</body>
+</html>
