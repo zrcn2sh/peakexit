@@ -55,9 +55,13 @@ docker compose up -d
 - 해외 잔고는 짧은 간격으로 2회 조회 후 종목 키(`ticker+exchange`) 기준 병합하여 일시 누락을 줄였습니다.
 
 ### 3) 시드 기준 수익률 계산 방식
-- 시드 기준은 `output2` 전체가 아니라 스칼라 총자산 기준으로 계산합니다.
-- 국내 `output2`의 `nass_amt` 또는 `tot_evlu_amt` + 해외주식(원화환산)으로 총자산을 구성합니다.
-- 예수금(`dnca_tot_amt`)은 요약에 함께 표시됩니다.
+- **총자산(원화)**  
+  - 국내: `TTTC8434R` — `output2`와 보유 `output1` 합계 중 큰 값 사용, 당일 매수는 체결내역으로 보완 (`ord_psbl_qty`·당일 BUY 체결)  
+  - 해외: `CTRP6504R` 체결기준현재잔고 `output3` 합계 또는 `output1` 평가 + `output2` USD 예수금(환율 환산)  
+  - 해외 폴백: `TTTS3012R` **NASD 1회** (거래소 3회 합산은 중복 방지를 위해 미사용)
+- **수익률(시드)**: `(총자산 + 매도보정 - 시드) / 시드 × 100`
+- **보유(매입) 기준**: `output2`의 `pchs_amt_smtl_amt`, `evlu_pfls_smtl_amt` 우선.
+- **미반영 현금 보정**: `당일 매도 − 당일 매수 − (국내예수금 + 외화예수금원화)` — `thdt_sll/buy_amt`·체결·USD 예수 반영.
 
 ### 4) 표시 형식
 - 대시보드 금액/수익률/비율은 소수점 없이 정수로 표시합니다.
@@ -179,6 +183,42 @@ allow 192.168.1.0/24;   # 특정 서브넷만 허용할 경우
 ### 미니 PC 고정 IP 설정 (권장)
 공유기 관리 페이지에서 미니 PC의 MAC 주소에 고정 IP를 할당하면
 재부팅 후에도 항상 같은 주소로 접근 가능합니다.
+
+### PC → 미니PC 코드 배포 (`.git` 제외)
+
+`scp -r` 로 프로젝트 전체를 복사하면 Windows에서 `.git/objects` **Permission denied** 가 자주 납니다.  
+**`.git` 폴더는 배포에 필요 없으므로 제외**하고 올리세요.
+
+**PowerShell (권장, tar+scp):**
+
+```powershell
+cd E:\DEV\peakexit
+.\scripts\deploy-to-minipc.ps1 -User YOUR_USER -HostName 192.168.0.137 -RemoteDir ~/peakexit -Rebuild
+# (YOUR_USER를 실제 SSH 사용자명으로 바꾸세요)
+```
+
+SFTP만 거부될 때:
+
+```powershell
+.\scripts\deploy-to-minipc.ps1 -User YOUR_USER -HostName 192.168.0.137 -UseLegacyScp
+```
+
+**WSL / Git Bash (rsync):**
+
+```bash
+chmod +x scripts/deploy-to-minipc.sh
+./scripts/deploy-to-minipc.sh user@192.168.0.137 ~/peakexit
+```
+
+**수동 (tar 한 번에):**
+
+```powershell
+tar -czf peakexit.tgz --exclude=.git --exclude=.env --exclude=__pycache__ --exclude=data .
+scp peakexit.tgz user@192.168.0.137:~/peakexit/
+ssh user@192.168.0.137 "cd ~/peakexit && tar -xzf peakexit.tgz && docker compose up -d --build"
+```
+
+미니PC에서는 Git으로 받아 두고, 개발 PC에서는 위 방식으로 **소스만** 동기화하면 됩니다.
 
 ### 부팅 시 자동 시작
 ```bash

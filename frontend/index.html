@@ -66,6 +66,26 @@
   .base-row span:first-child{color:var(--text2);flex-shrink:0}
   .base-row .base-val{font-weight:700;font-size:15px;text-align:right}
 
+  .asset-breakdown-panel{background:var(--bg2);border:1px solid var(--border);border-radius:var(--card-r);padding:12px 20px;margin-bottom:22px}
+  .asset-breakdown-panel.is-expanded{padding-bottom:16px}
+  .asset-bd-toggle{width:100%;display:flex;align-items:center;gap:10px;background:none;border:none;color:inherit;cursor:pointer;padding:4px 0;margin:0;font:inherit;text-align:left}
+  .asset-bd-toggle:hover .asset-bd-toggle-title{color:var(--accent)}
+  .asset-bd-toggle-title{margin:0;font-size:16px;font-weight:600;letter-spacing:.3px;flex-shrink:0}
+  .asset-bd-toggle-meta{font-size:var(--fs-xs);color:var(--text2);font-weight:500;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .asset-bd-chevron{color:var(--text2);font-size:11px;flex-shrink:0;transition:transform .15s ease}
+  .asset-breakdown-panel.is-expanded .asset-bd-chevron{transform:rotate(90deg)}
+  .asset-bd-collapse{margin-top:12px}
+  .asset-bd-table{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
+  .asset-bd-table td{padding:9px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
+  .asset-bd-table tr:last-child td{border-bottom:none}
+  .asset-bd-table td:first-child{color:var(--text2)}
+  .asset-bd-table td:last-child{text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
+  .asset-bd-table tfoot td{border-top:1px solid var(--border2);padding-top:12px;font-weight:700}
+  .asset-bd-table .row-subtotal td{color:var(--warn)}
+  .asset-bd-table .row-total td{font-size:15px;color:var(--accent)}
+  .asset-bd-sum-ok{font-size:var(--fs-2xs);color:var(--accent);margin-top:8px}
+  .asset-bd-sum-warn{font-size:var(--fs-2xs);color:var(--danger);margin-top:8px}
+
   /* Section */
   .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
   .section-head h2{font-size:16px;font-weight:600;letter-spacing:.3px}
@@ -75,6 +95,8 @@
   .holdings-table th,.atr-table th{text-align:left;font-size:var(--fs-2xs);color:var(--text2);padding:0 12px 11px;font-weight:500;letter-spacing:.6px;text-transform:uppercase;border-bottom:1px solid var(--border)}
   .holdings-table td,.atr-table td{padding:14px 12px;border-bottom:1px solid var(--border);font-size:var(--fs-sm);vertical-align:middle}
   .holdings-table tr:hover td,.atr-table tr:hover td{background:rgba(255,255,255,0.02)}
+  .holding-eval-sub{font-size:var(--fs-2xs);color:var(--text2);font-weight:500;margin-top:5px;line-height:1.45}
+  .holding-eval-sub .holding-eval-krw{color:var(--text);font-weight:600}
   .ticker-badge{background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px 9px;font-size:var(--fs-xs);font-weight:700;letter-spacing:.5px;color:var(--accent2)}
   .signal-badge{display:inline-flex;align-items:center;gap:5px;border-radius:20px;padding:4px 11px;font-size:var(--fs-2xs);font-weight:600}
   .signal-sell{background:rgba(255,75,110,0.12);color:var(--danger);border:1px solid rgba(255,75,110,0.25)}
@@ -104,12 +126,12 @@
   .toggle input:checked~.toggle-thumb{left:21px;background:#000}
 
   /* Log */
-  .log-item{padding:10px 0;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:4px}
-  .log-item:last-child{border-bottom:none}
-  .log-head{display:flex;justify-content:space-between;align-items:center}
-  .log-name{font-size:var(--fs-sm);font-weight:600}
-  .log-time{font-size:var(--fs-2xs);color:var(--text2)}
-  .log-reason{font-size:var(--fs-xs);color:var(--text2)}
+  .log-hint{font-size:var(--fs-2xs);color:var(--text2);margin:-8px 0 14px;line-height:1.6}
+  .log-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .log-table th,.log-table td{white-space:nowrap;font-size:var(--fs-xs)}
+  .log-table .log-name-cell{white-space:normal;min-width:120px}
+  .log-table .log-reason-cell{max-width:200px;white-space:normal;font-size:var(--fs-2xs);color:var(--text2)}
+  .log-legacy{color:var(--text3);font-size:var(--fs-2xs)}
 
   /* ATR 신뢰도 */
   .conf-high{color:var(--accent)}
@@ -170,9 +192,23 @@
     <div class="content" id="tab-dashboard">
       <div class="metrics">
         <div class="metric-card"><div class="label">시드머니</div><div class="value neutral" id="m-seed">—</div><div class="sub">기준 금액</div></div>
-        <div class="metric-card"><div class="label" id="m-eval-label">현재 평가금액</div><div class="value" id="m-eval">—</div><div class="sub" id="m-pnl">평가손익</div></div>
+        <div class="metric-card"><div class="label" id="m-eval-label">현재 평가금액</div><div class="value" id="m-eval">—</div><div class="sub" id="m-pnl">평가손익</div><div class="sub" id="m-asset-breakdown" style="font-size:var(--fs-2xs);color:var(--text2);line-height:1.5"></div><div class="sub" id="m-pending-adj" style="display:none;color:var(--warn)"></div></div>
         <div class="metric-card"><div class="label">총 수익률</div><div class="value" id="m-rate">—</div><div class="sub" id="m-rate-sub">시드머니 기준 (아래와 동일)</div></div>
         <div class="metric-card"><div class="label">보유 종목수</div><div class="value neutral" id="m-count">—</div><div class="sub">매도신호 <span id="m-signals" class="down">0</span></div></div>
+      </div>
+      <div class="asset-breakdown-panel" id="assetBreakdownPanel">
+        <button type="button" class="asset-bd-toggle" id="assetBdToggle" aria-expanded="false" aria-controls="assetBdCollapse">
+          <span class="asset-bd-toggle-title">추정 총자산 구성</span>
+          <span class="asset-bd-toggle-meta" id="assetBdToggleMeta"></span>
+          <span class="asset-bd-chevron" aria-hidden="true">▸</span>
+        </button>
+        <div class="asset-bd-collapse" id="assetBdCollapse" hidden>
+          <table class="asset-bd-table">
+            <tbody id="assetBdBody"></tbody>
+            <tfoot id="assetBdFoot"></tfoot>
+          </table>
+          <div id="assetBdCheck" class="asset-bd-sum-ok"></div>
+        </div>
       </div>
       <div class="summary-bases" id="summaryBases">
         <div class="base-col">
@@ -305,6 +341,7 @@
     <div class="content" id="tab-log" style="display:none">
       <div class="panel">
         <h2>📋 매도 이력</h2>
+        <p class="log-hint">이전 기록은 매입평균·매도단가가 저장되지 않아 매입평균·수익합계 등이 비어 있을 수 있습니다. 이후 매도부터 전 항목이 채워집니다.</p>
         <div id="logList"><div style="color:var(--text2);text-align:center;padding:30px">매도 이력 없음</div></div>
       </div>
     </div>
@@ -384,6 +421,7 @@ const API = '/api';
 
 /** 직전에 성공적으로 받은 데이터 (무효 응답 시 화면 유지) */
 let _lastSummary = null;
+let _lastFxRate = null;
 let _lastHoldings = null;
 let _loadInFlight = false;
 let _loadQueued = false;
@@ -441,6 +479,8 @@ async function loadData() {
     let holdings = null;
     let summary = null;
     let ok = false;
+    let lastValidHoldings = null;
+    let lastValidSummary = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       const res = await fetch(API + '/stocks/dashboard');
       if (gen !== _loadGen) return;
@@ -451,7 +491,12 @@ async function loadData() {
       summary = data.summary;
       const cnt = Number(summary && summary.holdings_count);
       const len = Array.isArray(holdings) ? holdings.length : -1;
-      const aligned = validSummary(summary) && validHoldings(holdings) && cnt === len;
+      const validPayload = validSummary(summary) && validHoldings(holdings);
+      if (validPayload) {
+        lastValidHoldings = holdings;
+        lastValidSummary = summary;
+      }
+      const aligned = validPayload && cnt === len;
       if (aligned) {
         ok = true;
         break;
@@ -461,6 +506,17 @@ async function loadData() {
     }
 
     if (!ok) {
+      if (lastValidSummary && lastValidHoldings) {
+        // 건수 불일치가 지속돼도 유효 데이터는 최신 스냅샷으로 갱신(고정 stale 방지)
+        const repairedSummary = { ...lastValidSummary, holdings_count: lastValidHoldings.length };
+        _lastSummary = repairedSummary;
+        _lastHoldings = lastValidHoldings;
+        renderMetrics(repairedSummary);
+        renderHoldings(lastValidHoldings);
+        if (lc) lc.textContent = '부분 갱신(건수 불일치) · ' + new Date().toLocaleTimeString('ko-KR');
+        setTimeout(() => { if (gen === _loadGen) loadData(); }, 1500);
+        return;
+      }
       console.warn('대시보드 3회 후에도 불완전 — 이전 화면 유지', summary, holdings);
       if (lc) {
         lc.textContent = _lastSummary
@@ -514,31 +570,261 @@ function fmtCur(h, n) {
   return fmt(x) + '원';
 }
 
+function logCcy(l) {
+  return l.currency || (l.ovrs_excg_cd ? 'USD' : 'KRW');
+}
+function fmtLogMoney(l, n) {
+  if (n == null || n === '' || (typeof n === 'number' && !Number.isFinite(n))) return '—';
+  const x = Number(n);
+  if (!Number.isFinite(x) || x <= 0) return '—';
+  if (logCcy(l) === 'USD')
+    return '$' + x.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return fmt(x) + '원';
+}
+function fmtLogQty(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x) || x <= 0) return '—';
+  return fmt(x) + '주';
+}
+function fmtLogPct(n) {
+  if (n == null || n === '') return '—';
+  const x = Number(n);
+  if (!Number.isFinite(x)) return '—';
+  return (x >= 0 ? '+' : '') + x.toFixed(2) + '%';
+}
+function fmtLogKrw(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return '—';
+  return (x >= 0 ? '+' : '') + fmt(x) + '원';
+}
+function fmtLogProfit(l, n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return '—';
+  if (logCcy(l) === 'USD')
+    return (x >= 0 ? '+' : '-') + '$' + Math.abs(x).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return fmtLogKrw(x);
+}
+
+function fmtUsd(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return '—';
+  return '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function holdingEvalAmounts(h, fxRate) {
+  const qty = Number(h.quantity) || 0;
+  const price = Number(h.current_price) || 0;
+  if (h.currency === 'USD') {
+    const usd = Number(h.eval_amount_usd ?? h.eval_amount) || (qty > 0 && price > 0 ? qty * price : 0);
+    const rowFx = Number(h.fx_rate);
+    const fx = (Number.isFinite(rowFx) && rowFx > 0) ? rowFx : Number(fxRate);
+    let krw = Number(h.eval_amount_krw);
+    if (Number.isFinite(krw) && krw > 0 && usd > 0 && krw <= usd * 1.05 && fx > 0) {
+      krw = Math.round(usd * fx);
+    } else if ((!Number.isFinite(krw) || krw <= 0) && usd > 0 && Number.isFinite(fx) && fx > 0) {
+      krw = Math.round(usd * fx);
+    }
+    return { usd, krw: Number.isFinite(krw) ? krw : 0 };
+  }
+  const krw = Number(h.eval_amount) || (qty > 0 && price > 0 ? qty * price : 0);
+  return { usd: 0, krw };
+}
+
+function footRow(label, amount, sign) {
+  const n = Number(amount) || 0;
+  const prefix = sign === '-' ? '−' : (sign === '+' ? '+' : '');
+  const cls = sign === '-' ? ' style="color:var(--danger)"' : (sign === '+' ? ' style="color:var(--warn)"' : '');
+  return '<tr><td>' + label + '</td><td' + cls + '>' + prefix + fmt(Math.abs(n)) + '원</td></tr>';
+}
+
+function fmtHoldingValueHtml(h, fxRate) {
+  const ev = holdingEvalAmounts(h, fxRate);
+  if (h.currency === 'USD') {
+    if (ev.usd <= 0 && ev.krw <= 0) return '';
+    let html = '<div class="holding-eval-sub">';
+    if (ev.usd > 0) html += '<span>보유 ' + fmtUsd(ev.usd) + '</span>';
+    if (ev.krw > 0) {
+      if (ev.usd > 0) html += '<br>';
+      html += '<span class="holding-eval-krw">≈' + fmt(ev.krw) + '원</span>';
+    }
+    html += '</div>';
+    return html;
+  }
+  if (ev.krw <= 0) return '';
+  return '<div class="holding-eval-sub"><span>보유 ' + fmt(ev.krw) + '원</span></div>';
+}
+
+function getAssetBreakdown(s) {
+  const b = (s && s.asset_breakdown) || {};
+  const pick = (...vals) => {
+    for (const v of vals) {
+      const x = Number(v);
+      if (Number.isFinite(x)) return x;
+    }
+    return 0;
+  };
+  return {
+    domestic_stocks_krw: pick(b.domestic_stocks_krw, s && s.domestic_stocks_krw),
+    domestic_cash_krw: pick(b.domestic_cash_krw, s && s.domestic_cash_krw, s && s.cash_deposit_krw),
+    overseas_stocks_usd: pick(b.overseas_stocks_usd, s && s.overseas_stocks_usd),
+    overseas_stocks_krw: pick(b.overseas_stocks_krw, s && s.overseas_stocks_krw),
+    overseas_cash_usd: pick(b.overseas_cash_usd, s && s.overseas_cash_usd),
+    overseas_cash_krw: pick(b.overseas_cash_krw, s && s.overseas_cash_krw, s && s.overseas_usd_cash_krw),
+    pending_sell_krw: pick(b.pending_sell_settlement_krw, b.pending_sell_krw, s && s.pending_sell_settlement_krw, s && s.pending_sell_proceeds_krw),
+    pending_sell_dom_krw: pick(b.pending_sell_settlement_dom_krw, s && s.pending_sell_settlement_dom_krw),
+    pending_sell_ov_krw: pick(b.pending_sell_settlement_ov_krw, s && s.pending_sell_settlement_ov_krw),
+    nrcvb_buy_amt_krw: pick(b.nrcvb_buy_amt_krw, s && s.nrcvb_buy_amt_krw),
+    credit_loan_krw: pick(b.credit_loan_krw, s && s.credit_loan_krw),
+    deductions_krw: pick(b.deductions_krw, s && s.deductions_krw),
+    fx_usd_krw: b.fx_usd_krw != null ? Number(b.fx_usd_krw) : (s && Number(s.usd_krw_rate)) || null,
+  };
+}
+
+function sumBreakdownSubtotal(ab) {
+  return ab.domestic_stocks_krw + ab.domestic_cash_krw + ab.overseas_stocks_krw + ab.overseas_cash_krw;
+}
+
+function displayTotalKrw(s) {
+  if (!s) return 0;
+  if (s.total_net_worth_krw != null && Number.isFinite(Number(s.total_net_worth_krw))) {
+    return Number(s.total_net_worth_krw);
+  }
+  const ab = getAssetBreakdown(s);
+  const sub = sumBreakdownSubtotal(ab);
+  return sub + ab.pending_sell_krw - ab.deductions_krw;
+}
+
+const ASSET_BD_OPEN_KEY = 'peakexit_asset_bd_open';
+
+function setAssetBreakdownOpen(open) {
+  const panel = document.getElementById('assetBreakdownPanel');
+  const btn = document.getElementById('assetBdToggle');
+  const collapse = document.getElementById('assetBdCollapse');
+  if (!panel || !btn || !collapse) return;
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  collapse.hidden = !open;
+  panel.classList.toggle('is-expanded', open);
+  try { localStorage.setItem(ASSET_BD_OPEN_KEY, open ? '1' : '0'); } catch (e) {}
+}
+
+function initAssetBreakdownToggle() {
+  const btn = document.getElementById('assetBdToggle');
+  if (!btn || btn.dataset.bound) return;
+  btn.dataset.bound = '1';
+  let open = false;
+  try { open = localStorage.getItem(ASSET_BD_OPEN_KEY) === '1'; } catch (e) {}
+  setAssetBreakdownOpen(open);
+  btn.addEventListener('click', () => {
+    setAssetBreakdownOpen(btn.getAttribute('aria-expanded') !== 'true');
+  });
+}
+
+function renderAssetBreakdown(s) {
+  const panel = document.getElementById('assetBreakdownPanel');
+  const body = document.getElementById('assetBdBody');
+  const foot = document.getElementById('assetBdFoot');
+  const check = document.getElementById('assetBdCheck');
+  const meta = document.getElementById('assetBdToggleMeta');
+  if (!panel || !body || !foot) return;
+
+  const ab = getAssetBreakdown(s);
+  const sub = sumBreakdownSubtotal(ab);
+  const total = displayTotalKrw(s);
+  const apiFx = ab.fx_usd_krw > 0 ? ab.fx_usd_krw : (_lastFxRate || 0);
+  const rows = [
+    ['국내 주식평가금액', fmt(ab.domestic_stocks_krw) + '원'],
+    ['국내 예수금', fmt(ab.domestic_cash_krw) + '원'],
+    ['해외 주식평가금액 (달러)', fmtUsd(ab.overseas_stocks_usd)],
+    ['해외 주식평가금액 (원화)', fmt(ab.overseas_stocks_krw) + '원' + (apiFx > 0 ? ' · API환율 ' + fmt(apiFx) + '원/USD' : '')],
+    ['해외 예수금 (달러)', fmtUsd(ab.overseas_cash_usd)],
+    ['해외 예수금 (원화)', fmt(ab.overseas_cash_krw) + '원'],
+  ];
+  body.innerHTML = rows.map(([label, val]) =>
+    '<tr><td>' + label + '</td><td>' + val + '</td></tr>'
+  ).join('');
+
+  let footHtml = '<tr class="row-subtotal"><td>소계 (국내주식+국내예수+해외주식원화+해외예수원화)</td><td>' + fmt(sub) + '원</td></tr>';
+  footHtml += footRow('(+) 매도 미결제 · 국내 T+2', ab.pending_sell_dom_krw, '+');
+  footHtml += footRow('(+) 매도 미결제 · 해외 T+1', ab.pending_sell_ov_krw, '+');
+  footHtml += footRow('(−) 미수매수 nrcvb_buy_amt', ab.nrcvb_buy_amt_krw, '-');
+  footHtml += footRow('(−) 신용대출 tot_loan_amt', ab.credit_loan_krw, '-');
+  if (Number(s.hts_tot_evlu_krw) > 0 || Number(s.hts_nass_krw) > 0) {
+    footHtml += '<tr><td colspan="2" style="font-size:var(--fs-2xs);color:var(--text2);padding-top:8px">— 한투 API 참조 —</td></tr>';
+    if (Number(s.hts_tot_evlu_krw) > 0) footHtml += '<tr><td>output2.tot_evlu_amt (국내)</td><td>' + fmt(s.hts_tot_evlu_krw) + '원</td></tr>';
+    if (Number(s.hts_nass_krw) > 0) footHtml += '<tr><td>output2.nass_amt (순자산)</td><td>' + fmt(s.hts_nass_krw) + '원</td></tr>';
+  }
+  if (ab.overseas_cash_usd <= 0 && ab.overseas_cash_krw <= 0 && ab.overseas_stocks_krw > 0) {
+    footHtml += '<tr><td colspan="2" style="font-size:var(--fs-2xs);color:var(--warn)">해외 예수금(USD) 미조회 — /debug로 frcr_dnca 확인</td></tr>';
+  }
+  footHtml += '<tr class="row-total"><td>추정 총자산</td><td>' + fmt(total) + '원</td></tr>';
+  foot.innerHTML = footHtml;
+
+  if (check) {
+    const expected = sub + ab.pending_sell_krw - ab.deductions_krw;
+    const diff = Math.abs(expected - total);
+    if (sub > 0 && diff <= 1) {
+      check.textContent = '✓ 항목 합계와 총자산 일치';
+      check.className = 'asset-bd-sum-ok';
+    } else if (sub > 0) {
+      check.textContent = '⚠ 합계 불일치: 계산 ' + fmt(expected) + '원 vs 표시 ' + fmt(total) + '원';
+      check.className = 'asset-bd-sum-warn';
+    } else {
+      check.textContent = '';
+    }
+  }
+  if (meta) {
+    meta.textContent = sub > 0
+      ? '총 ' + fmt(total) + '원 · 클릭하여 상세'
+      : '';
+  }
+  panel.style.display = '';
+}
+
 function renderMetrics(s) {
   if (!s || !validSummary(s)) return;
+  const abFx = getAssetBreakdown(s).fx_usd_krw;
+  _lastFxRate = Number(s.usd_krw_rate) || (abFx > 0 ? abFx : null);
   document.getElementById('m-seed').textContent = fmt(s.seed_money)+'원';
-  const useCashBasis = s.seed_basis_includes_cash && Number.isFinite(Number(s.total_net_worth_krw));
-  const displayEval = useCashBasis ? Number(s.total_net_worth_krw) : Number(s.current_eval);
+  const pendingSell = Number(s.pending_sell_proceeds_krw) || 0;
+  const displayEval = displayTotalKrw(s);
+  const useCashBasis = s.seed_basis_includes_cash || pendingSell > 0;
   const elEvalLabel = document.getElementById('m-eval-label');
   if (elEvalLabel) elEvalLabel.textContent = useCashBasis ? '추정 총자산' : '현재 평가금액';
   const ev = document.getElementById('m-eval');
+  const elPending = document.getElementById('m-pending-adj');
+  if (elPending) {
+    const pendingSell = Number(s.pending_sell_settlement_krw ?? s.pending_sell_proceeds_krw) || 0;
+    const deduct = Number(s.deductions_krw) || 0;
+    if (pendingSell > 0 || deduct > 0) {
+      elPending.style.display = '';
+      let note = '';
+      if (pendingSell > 0) note += '미결제 매도 +' + fmt(pendingSell) + '원';
+      if (deduct > 0) note += (note ? ' · ' : '') + '차감 −' + fmt(deduct) + '원';
+      elPending.textContent = note;
+    } else {
+      elPending.style.display = 'none';
+      elPending.textContent = '';
+    }
+  }
+  renderAssetBreakdown(s);
+  const ab = getAssetBreakdown(s);
+  const sub = sumBreakdownSubtotal(ab);
+  let evTitle = '국내주식 '+fmt(ab.domestic_stocks_krw)+' + 국내예수 '+fmt(ab.domestic_cash_krw);
+  evTitle += ' + 해외주식(원) '+fmt(ab.overseas_stocks_krw)+' + 해외예수(원) '+fmt(ab.overseas_cash_krw);
+  if (ab.pending_sell_krw > 0) evTitle += ' + 미결제 '+fmt(ab.pending_sell_krw);
+  if (ab.deductions_krw > 0) evTitle += ' − 차감 '+fmt(ab.deductions_krw);
+  evTitle += ' = '+fmt(displayEval);
+  const elBd = document.getElementById('m-asset-breakdown');
+  if (elBd) {
+    elBd.textContent = '';
+    elBd.style.display = 'none';
+  }
   ev.textContent = fmt(displayEval)+'원';
-  let evTitle = '';
-  if (useCashBasis) {
-    evTitle = 'KIS 국내 잔고 output2(순자산/총평가) + 해외주식 원화환산. 주식만: '+fmt(s.current_eval)+'원';
-    const cd = Number(s.cash_deposit_krw);
-    if (Number.isFinite(cd) && cd > 0) evTitle += ' · 예수금(dnca_tot_amt): '+fmt(cd)+'원';
-  } else if (s.fx_includes_usd && Number.isFinite(Number(s.usd_krw_rate))) {
-    const usdEval = Number(s.current_eval_usd);
-    const usdStr = Number.isFinite(usdEval) ? Math.round(usdEval).toLocaleString('en-US') : '?';
-    evTitle = '국내 '+fmt(s.current_eval_krw_domestic||0)+'원 + 해외 USD '+usdStr+' (× '+Math.round(Number(s.usd_krw_rate))+'원/$)';
-  } else if (s.fx_usd_excluded_from_krw_totals)
-    evTitle = '해외(USD)는 환율 미조회로 합계에서 제외됨. FX_USD_KRW 로 수동 입력 가능';
   ev.title = evTitle;
   ev.className = 'value '+(Number(s.unrealized_pnl) >= 0 ? 'up' : 'down');
   let pnlLine = '평가손익 '+(Number(s.unrealized_pnl) >= 0 ? '+' : '')+fmt(s.unrealized_pnl)+'원';
-  if (s.fx_includes_usd && Number.isFinite(Number(s.usd_krw_rate)))
-    pnlLine += ' (환율 '+Math.round(Number(s.usd_krw_rate))+'원/$)';
+  if (s.output2_unrealized_krw != null && Number(s.output2_unrealized_krw) !== 0)
+    pnlLine += ' (output2 evlu_pfls_smtl)';
   const cd = Number(s.cash_deposit_krw);
   if (Number.isFinite(cd) && cd > 0)
     pnlLine += '\n예수금(추정) '+fmt(cd)+'원';
@@ -550,7 +836,7 @@ function renderMetrics(s) {
   document.getElementById('m-rate-sub').textContent = '시드머니 기준 (상세는 아래)';
   document.getElementById('m-count').textContent = s.holdings_count+'개';
 
-  const pvs = Number(s.pnl_vs_seed_krw);
+  const pvs = displayEval - Number(s.seed_money);
   const elSpnl = document.getElementById('sb-seed-pnl');
   const elSrate = document.getElementById('sb-seed-rate');
   const elCb = document.getElementById('sb-cost-basis');
@@ -567,7 +853,17 @@ function renderMetrics(s) {
   const tp = Number(s.total_purchase);
   const ur = Number(s.unrealized_pnl);
   const costR = Number(s.return_pct_on_holdings_cost ?? s.return_on_cost_pct);
-  if (elCb) elCb.textContent = fmt(tp) + '원';
+  const tpDom = Number(s.total_purchase_krw_domestic);
+  const tpOvKrw = Number(s.purchase_amount_usd_as_krw);
+  if (elCb) {
+    let costTxt = fmt(tp) + '원';
+    if (tpOvKrw > 0 && Number.isFinite(tpDom))
+      costTxt += ' (국내 ' + fmt(tpDom) + ' + 해외 ' + fmt(tpOvKrw) + ')';
+    elCb.textContent = costTxt;
+    elCb.title = tpOvKrw > 0
+      ? '국내 output2·보유 + 해외 매입(USD×환율)'
+      : '국내 보유 매입원가(output2 또는 종목 합)';
+  }
   if (elCpnl) {
     elCpnl.textContent = (ur >= 0 ? '+' : '') + fmt(ur) + '원';
     elCpnl.className = 'base-val ' + (ur >= 0 ? 'up' : 'down');
@@ -611,7 +907,7 @@ function renderHoldings(holdings) {
       <td><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="ticker-badge">${h.ticker}</span><span>${h.name}</span>${h.currency==='USD' ? '<span style="font-size:var(--fs-2xs);color:var(--warn);font-weight:600">USD</span>' : ''}</div></td>
       <td>${fmt(h.quantity)}주</td>
       <td>${fmtCur(h, h.avg_price)}</td>
-      <td style="font-weight:600">${fmtCur(h, h.current_price)}</td>
+      <td style="font-weight:600">${fmtCur(h, h.current_price)}${fmtHoldingValueHtml(h, _lastFxRate)}</td>
       <td>
         <div style="color:${pColor};font-weight:600">${fmtPct(p)}</div>
         <div class="progress-bar"><div class="progress-fill" style="width:${pBarW}%;background:${pColor}"></div></div>
@@ -766,21 +1062,38 @@ async function loadLog() {
     const logs = await fetch(API+'/portfolio/sell-log').then(r=>r.json());
     const el = document.getElementById('logList');
     if (!logs.length) { el.innerHTML = '<div style="color:var(--text2);text-align:center;padding:30px">매도 이력 없음</div>'; return; }
-    el.innerHTML = logs.map(l => {
+    const rows = logs.map(l => {
       const pColor = (l.profit_rate||0)>=0?'var(--accent)':'var(--danger)';
-      const time = l.checked_at?new Date(l.checked_at).toLocaleString('ko-KR'):'';
-      return `<div class="log-item">
-        <div class="log-head">
-          <span class="log-name">${l.name} <span class="ticker-badge" style="font-size:var(--fs-2xs)">${l.ticker}</span></span>
-          <span class="log-time">${time}</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <span class="log-reason">${l.reason_label||l.reason} · ${fmt(l.quantity)}주 · ${fmt(l.current_price||0)}원</span>
-          <span style="color:${pColor}">${fmtPct(l.profit_rate||0)}</span>
-        </div>
-        ${l.success===false?`<div style="font-size:var(--fs-2xs);color:var(--danger)">⚠ 실패: ${l.error}</div>`:''}
-      </div>`;
+      const time = l.checked_at ? new Date(l.checked_at).toLocaleString('ko-KR', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }) : '—';
+      const legacy = l.avg_price == null && l.profit_amount == null;
+      const status = l.success === false
+        ? `<span style="color:var(--danger)">실패</span>`
+        : '<span style="color:var(--accent)">완료</span>';
+      const profitKrwCell = l.profit_amount_krw != null
+        ? fmtLogKrw(l.profit_amount_krw) + (logCcy(l) === 'USD' && l.usd_krw_rate ? `<div class="log-legacy">≈${fmt(l.usd_krw_rate)}원/$</div>` : '')
+        : '—';
+      return `<tr>
+        <td>${time}</td>
+        <td class="log-name-cell"><b>${l.name||''}</b><br><span class="ticker-badge">${l.ticker||''}</span></td>
+        <td class="log-reason-cell">${l.reason_label||l.reason||'—'}${legacy ? '<div class="log-legacy">구버전 기록</div>' : ''}</td>
+        <td>${fmtLogMoney(l, l.avg_price)}</td>
+        <td>${fmtLogQty(l.quantity)}</td>
+        <td>${fmtLogMoney(l, l.sell_price)}</td>
+        <td>${fmtLogMoney(l, l.sell_total)}</td>
+        <td style="color:${pColor};font-weight:600">${l.profit_rate != null ? fmtLogPct(l.profit_rate) : '—'}</td>
+        <td style="color:${pColor}">${l.profit_amount != null ? fmtLogProfit(l, l.profit_amount) : '—'}</td>
+        <td style="color:${pColor}">${profitKrwCell}</td>
+        <td>${status}${l.success===false && l.error ? `<div class="log-legacy">${l.error}</div>` : ''}</td>
+      </tr>`;
     }).join('');
+    el.innerHTML = `<div class="log-table-wrap"><table class="holdings-table log-table">
+      <thead><tr>
+        <th>일시</th><th>종목</th><th>사유</th>
+        <th>매입평균</th><th>수량</th><th>매도가</th><th>매도합계</th>
+        <th>수익률</th><th>수익합계</th><th>수익합계(원)</th><th>상태</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
   } catch(e) {}
 }
 
@@ -798,6 +1111,7 @@ async function sendReportNow() {
   } catch(e) { alert('발송 실패: '+e.message); }
 }
 
+initAssetBreakdownToggle();
 loadData();
 setInterval(loadData, 60000);
 </script>

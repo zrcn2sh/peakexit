@@ -11,6 +11,7 @@
 /atr      - 종목별 ATR 트레일링 설정
 /status   - 시스템 상태
 /check    - 즉시 매도 검사 실행
+/debug    - 국내/해외 잔고 API raw (총자산 디버깅)
 """
 import logging
 import threading
@@ -24,13 +25,14 @@ logger = logging.getLogger(__name__)
 HELP_TEXT = """
 🤖 <b>PeakExit 봇 명령어</b>
 ──────────────────────
-/holdings  — 보유종목 + 수익률
-/summary   — 시드·보유(매입) 기준 수익 요약
-/overview  — 요약+보유 전체 (수동 현황, 메시지 2통)
+/holdings  — 보유종목 (수익률·보유금액)
+/summary   — 총자산·시드·매입원가 요약
+/overview  — 요약 + 보유 (2통)
 /현황      — /overview 와 동일
 /atr       — 종목별 트레일링 비율
 /check     — 즉시 매도 검사 실행
 /status    — 시스템 상태 확인
+/debug     — 잔고 API raw (총자산 디버깅)
 /help      — 이 도움말
 ──────────────────────
 💡 매도 신호/결과는 자동으로 전송됩니다
@@ -64,110 +66,47 @@ class TelegramCommandHandler:
         self.notifier._send(text)
 
     def _build_portfolio_summary_message(self, summary: dict, seed: float) -> str:
-        """포트폴리오 요약 본문 (/summary 와 동일 포맷)."""
-        rate_seed = float(summary.get("return_pct_on_seed", summary["total_return_pct"]))
-        rate_seed_str = f"+{rate_seed:.2f}%" if rate_seed >= 0 else f"{rate_seed:.2f}%"
-        rate_seed_icon = "📈" if rate_seed >= 0 else "📉"
-        cost_rate = float(
-            summary.get("return_pct_on_holdings_cost", summary.get("return_on_cost_pct", 0.0))
-        )
-        cost_rate_str = f"+{cost_rate:.2f}%" if cost_rate >= 0 else f"{cost_rate:.2f}%"
-        cost_rate_icon = "📈" if cost_rate >= 0 else "📉"
-        pnl_seed = float(summary.get("pnl_vs_seed_krw", summary.get("total_net_worth_krw", summary["current_eval"]) - seed))
-        pnl_seed_str = f"+{pnl_seed:,.0f}" if pnl_seed >= 0 else f"{pnl_seed:,.0f}"
-        total_purchase = float(summary.get("total_purchase", 0.0))
-        unreal = summary["unrealized_pnl"]
-        unreal_str = f"+{unreal:,.0f}" if unreal >= 0 else f"{unreal:,.0f}"
-        eval_usd = summary.get("current_eval_usd") or 0.0
-        unreal_usd = summary.get("unrealized_pnl_usd") or 0.0
-        fx_line = ""
-        if summary.get("fx_includes_usd") and summary.get("usd_krw_rate"):
-            fx_line = (
-                f"\n💱 환율: 1 USD ≈ {summary['usd_krw_rate']:,.2f}원\n"
-                f"🌎 해외 평가(USD {eval_usd:,.2f}) → 약 {summary.get('current_eval_usd_as_krw') or 0:,.0f}원\n"
-                f"🌎 해외 미실현(USD {unreal_usd:+,.2f}) → 약 {(summary.get('unrealized_pnl_usd_as_krw') or 0):+,.0f}원"
-            )
-        elif summary.get("fx_usd_excluded_from_krw_totals"):
-            fx_line = (
-                f"\n⚠️ 해외 USD 평가 ${eval_usd:,.2f} — 환율 미조회로 원화 합계 제외\n"
-                f"   (수동: .env 에 FX_USD_KRW=1450 형식)"
-            )
-        elif summary.get("has_overseas"):
-            fx_line = f"\n🌎 해외(USD) 평가: ${eval_usd:,.2f} / 미실현 ${unreal_usd:+,.2f}"
+        from app.services.telegram import format_portfolio_summary_html
 
-        stocks_eval = float(summary["current_eval"])
-        net_worth = float(summary.get("total_net_worth_krw", stocks_eval))
-        cash_dep = float(summary.get("cash_deposit_krw") or 0.0)
-        incl_cash = bool(summary.get("seed_basis_includes_cash"))
+        return format_portfolio_summary_html(summary, seed)
 
-        acct_lines = f"주식 평가 합: {stocks_eval:,.0f}원{fx_line}\n"
-        if cash_dep > 0:
-            acct_lines += f"🏦 예수금(dnca_tot_amt): {cash_dep:,.0f}원\n"
-        if incl_cash:
-            acct_lines += f"📌 <b>총자산</b>(국내 output2 + 해외주식): {net_worth:,.0f}원\n"
-
-        return (
-            f"💼 <b>포트폴리오 요약</b>\n"
-            f"{'─' * 22}\n"
-            f"시드머니: {seed:,.0f}원\n"
-            f"{acct_lines}"
-            f"\n🌱 <b>시드머니 기준</b> (총자산 대비)\n"
-            f"   대비 손익: {pnl_seed_str}원\n"
-            f"   {rate_seed_icon} 수익률: <b>{rate_seed_str}</b>\n"
-            f"\n📊 <b>보유(매입원가) 기준</b>\n"
-            f"   총 매입원가: {total_purchase:,.0f}원\n"
-            f"   평가손익: {unreal_str}원\n"
-            f"   {cost_rate_icon} 수익률: <b>{cost_rate_str}</b>\n"
-            f"\n추정 자산: {summary['estimated_balance']:,.0f}원\n"
-            f"보유종목: {summary['holdings_count']}개 "
-            f"(국내 {summary.get('holdings_count_domestic', 0)} / "
-            f"해외 {summary.get('holdings_count_overseas', 0)})\n"
-            f"🕐 {datetime.now().strftime('%m/%d %H:%M')}"
-        )
-
-    def _build_holdings_message(self, client, settings: dict, cache: dict, holdings: list) -> str:
-        """보유종목 상세 본문 (/holdings 와 동일 포맷)."""
+    def _build_holdings_message(
+        self,
+        client,
+        settings: dict,
+        cache: dict,
+        holdings: list,
+        *,
+        fx_rate: float = 0,
+    ) -> str:
+        """보유종목 (/holdings)."""
         if not holdings:
             return "📭 현재 보유 종목이 없습니다."
 
         from app.core.sell_engine import evaluate_sell, peak_tracker
+        from app.services.telegram import format_holdings_list_html
 
-        lines = []
+        if not fx_rate:
+            try:
+                from app.services.fx_rate import get_usd_krw_rate
+                fx_rate = float(get_usd_krw_rate() or 0)
+            except Exception:
+                fx_rate = 0
+
+        enriched = []
         for h in holdings:
             client.enrich_holding_trading_meta(h, cache.get(h["ticker"]))
             ticker = h["ticker"]
-            pr = h["profit_rate"]
-            pr_str = f"+{pr:.2f}%" if pr >= 0 else f"{pr:.2f}%"
-            pr_icon = "📈" if pr >= 0 else "📉"
-            ccy = h.get("currency", "KRW")
-            if ccy == "USD":
-                px_line = f"현재 ${h['current_price']:,.2f} · 평균 ${h['avg_price']:,.2f}"
-            else:
-                px_line = f"현재가 {h['current_price']:,.0f}원"
-
-            peak_info = peak_tracker.update(ticker, h["current_price"], h["avg_price"])
-            drop = peak_info.get("drop_from_peak_pct", 0)
-            drop_str = f"고점대비 {drop:.1f}%" if peak_info.get("peak_price") else ""
-
+            peak_tracker.update(ticker, h["current_price"], h["avg_price"])
             tc = cache.get(ticker, {})
-            trail = f"트레일링 {tc.get('trailing_drop_pct','?')}%" if tc else ""
-
             signal = evaluate_sell(h, settings, tc or None)
-            signal_str = f"⚠️ {signal['reason_label']}" if signal else "✓ 보유중"
-            tag = "[미국]" if ccy == "USD" else "[국내]"
+            enriched.append({
+                **h,
+                "should_sell": signal is not None,
+                "sell_signal": signal,
+            })
 
-            lines.append(
-                f"{pr_icon} {tag} <b>{h['name']}</b> ({ticker})\n"
-                f"   {px_line} | {pr_str}\n"
-                f"   {drop_str}  {trail}\n"
-                f"   {signal_str}"
-            )
-
-        return (
-            f"📋 <b>보유종목 ({len(holdings)}개)</b>\n"
-            f"{'─' * 22}\n"
-            + "\n\n".join(lines)
-        )
+        return format_holdings_list_html(enriched, fx_rate=fx_rate, max_rows=20)
 
     # ── 명령어별 핸들러 ────────────────────────────
     def _cmd_help(self):
@@ -219,13 +158,12 @@ class TelegramCommandHandler:
             out2 = client.get_last_domestic_balance_output2()
             summary = calc_portfolio_summary(holdings, seed, [], out2)
 
+            fx = float(summary.get("usd_krw_rate") or 0)
+            self._send(self._build_portfolio_summary_message(summary, seed))
             self._send(
-                "📊 <b>수동 현황</b> ①/② 요약\n\n"
-                + self._build_portfolio_summary_message(summary, seed)
-            )
-            self._send(
-                "📊 <b>수동 현황</b> ②/② 보유\n\n"
-                + self._build_holdings_message(client, settings, cache, holdings)
+                self._build_holdings_message(
+                    client, settings, cache, holdings, fx_rate=fx
+                )
             )
         except Exception as e:
             self._send(f"⚠️ 현황 조회 실패: {e}")
@@ -240,19 +178,18 @@ class TelegramCommandHandler:
 
             lines = []
             for ticker, c in cache.items():
-                cl = c.get("classification", {})
                 conf = c.get("confidence", "?")
                 conf_icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(conf, "⚪")
                 lines.append(
-                    f"{conf_icon} <b>{ticker}</b> ({cl.get('size','?')})\n"
-                    f"   ATR {c.get('atr_pct','?')}% → 트레일링 <b>{c.get('trailing_drop_pct','?')}%</b>\n"
-                    f"   발동: {c.get('trailing_trigger_pct','?')}% | {c.get('reason','')[:40]}"
+                    f"{conf_icon} <b>{ticker}</b> "
+                    f"트레일링 <b>{c.get('trailing_drop_pct', '?')}%</b> "
+                    f"(ATR {c.get('atr_pct', '?')}%)"
                 )
 
             msg = (
-                f"📊 <b>종목별 ATR 트레일링</b>\n"
-                f"{'─' * 22}\n"
-                + "\n\n".join(lines)
+                f"📊 <b>ATR 트레일링</b>\n"
+                f"{'─' * 18}\n"
+                + "\n".join(lines)
             )
             self._send(msg)
         except Exception as e:
@@ -289,6 +226,29 @@ class TelegramCommandHandler:
         except Exception as e:
             self._send(f"⚠️ 검사 실패: {e}")
 
+    def _cmd_debug(self):
+        """국내/해외 inquire-balance raw → 로그 + 텔레그램."""
+        self._send("🔧 잔고 API raw 조회 중… (국내 TTTC8434R, 해외 TTTS3012R NASD/NYSE/AMEX)")
+        try:
+            from app.services.kis_client import get_kis_client
+            from app.services.balance_debug import (
+                fetch_balance_debug_snapshot,
+                log_balance_debug_snapshot,
+                telegram_messages_from_snapshot,
+            )
+
+            client = get_kis_client()
+            snapshot = fetch_balance_debug_snapshot(client)
+            log_balance_debug_snapshot(snapshot)
+            messages = telegram_messages_from_snapshot(snapshot)
+            for msg in messages:
+                self._send(msg)
+            if not messages:
+                self._send("⚠️ 디버그 출력이 비어 있습니다.")
+        except Exception as e:
+            logger.exception("balance /debug 실패")
+            self._send(f"⚠️ /debug 실패: {e}")
+
     # ── 메인 루프 ──────────────────────────────────
     def _process_update(self, update: dict):
         msg = update.get("message", {})
@@ -310,6 +270,7 @@ class TelegramCommandHandler:
             "/atr":      self._cmd_atr,
             "/status":   self._cmd_status,
             "/check":    self._cmd_check,
+            "/debug":    self._cmd_debug,
         }
 
         # @봇이름 suffix 제거

@@ -33,6 +33,199 @@ def _signal_currency(signal: dict) -> str:
     return signal.get("currency") or ("USD" if signal.get("ovrs_excg_cd") else "KRW")
 
 
+def format_pending_sell_compact(summary: dict) -> str:
+    """매도 미결제·차감 — 한 줄 요약."""
+    pending = float(
+        summary.get("pending_sell_settlement_krw")
+        or summary.get("pending_cash_adjustment_krw")
+        or summary.get("pending_sell_proceeds_krw")
+        or 0
+    )
+    dom_p = float(summary.get("pending_sell_settlement_dom_krw") or 0)
+    ov_p = float(summary.get("pending_sell_settlement_ov_krw") or 0)
+    deduct = float(summary.get("deductions_krw") or 0)
+    if pending <= 0 and deduct <= 0:
+        return ""
+    lines: list[str] = []
+    if pending > 0:
+        detail = f"국내 T+2 {dom_p:,.0f} + 해외 T+1 {ov_p:,.0f}".strip()
+        lines.append(f"   └ 미결제 매도 <b>+{pending:,.0f}원</b> ({detail})\n")
+    if deduct > 0:
+        nrcvb = float(summary.get("nrcvb_buy_amt_krw") or 0)
+        loan = float(summary.get("credit_loan_krw") or 0)
+        lines.append(
+            f"   └ 차감 <b>−{deduct:,.0f}원</b> (미수 {nrcvb:,.0f} + 대출 {loan:,.0f})\n"
+        )
+    return "".join(lines)
+
+
+def format_pending_sell_adjustment_html(summary: dict) -> str:
+    """하위 호환 — 간결 포맷."""
+    return format_pending_sell_compact(summary)
+
+
+def _pct_str(rate: float) -> str:
+    return f"+{rate:.2f}%" if rate >= 0 else f"{rate:.2f}%"
+
+
+def _pnl_krw_str(amount: float) -> str:
+    return f"+{amount:,.0f}" if amount >= 0 else f"{amount:,.0f}"
+
+
+def format_portfolio_summary_html(
+    summary: dict,
+    seed: float,
+    *,
+    title: str = "포트폴리오 요약",
+    show_holdings_count: bool = True,
+) -> str:
+    """총자산·시드·매입원가 핵심만."""
+    net = float(
+        summary.get("total_net_worth_krw")
+        or summary.get("estimated_balance")
+        or summary.get("current_eval")
+        or 0
+    )
+    rate_seed = float(summary.get("return_pct_on_seed", summary.get("total_return_pct", 0)))
+    cost_rate = float(
+        summary.get("return_pct_on_holdings_cost", summary.get("return_on_cost_pct", 0))
+    )
+    pnl_seed = float(summary.get("pnl_vs_seed_krw", net - seed))
+    total_purchase = float(summary.get("total_purchase", 0))
+    unreal = float(summary.get("unrealized_pnl", 0))
+    pending = format_pending_sell_compact(summary)
+
+    seed_icon = "📈" if rate_seed >= 0 else "📉"
+    cost_icon = "📈" if cost_rate >= 0 else "📉"
+
+    lines = [
+        f"💼 <b>{title}</b>\n",
+        f"{'─' * 18}\n",
+        f"💰 <b>추정 총자산</b> {net:,.0f}원\n",
+    ]
+    if pending:
+        lines.append(pending)
+
+    lines.extend([
+        f"\n🌱 시드 {seed:,.0f}원 → {_pnl_krw_str(pnl_seed)}원 "
+        f"({seed_icon} <b>{_pct_str(rate_seed)}</b>)\n",
+        f"📊 매입 {total_purchase:,.0f}원 · 평가손익 {_pnl_krw_str(unreal)}원 "
+        f"({cost_icon} <b>{_pct_str(cost_rate)}</b>)\n",
+    ])
+
+    if show_holdings_count:
+        n = int(summary.get("holdings_count", 0))
+        nd = int(summary.get("holdings_count_domestic", 0))
+        no = int(summary.get("holdings_count_overseas", 0))
+        lines.append(f"\n📋 보유 {n}종목 (국내 {nd} · 해외 {no})\n")
+
+    lines.append(f"🕐 {datetime.now(SEOUL_TZ).strftime('%m/%d %H:%M')}")
+    return "".join(lines)
+
+
+def _holding_eval_brief(h: dict, fx_rate: float = 0) -> str:
+    """보유금액 한 줄 (USD는 원화 환산)."""
+    qty = int(h.get("quantity") or 0)
+    price = float(h.get("current_price") or 0)
+    ccy = _holding_currency(h)
+    if ccy == "USD":
+        usd = float(h.get("eval_amount_usd") or h.get("eval_amount") or 0)
+        if usd <= 0 and qty > 0 and price > 0:
+            usd = qty * price
+        krw = float(h.get("eval_amount_krw") or 0)
+        fx = float(h.get("fx_rate") or fx_rate or 0)
+        if krw <= 0 and usd > 0 and fx > 0:
+            krw = round(usd * fx)
+        if usd > 0 and krw > 0:
+            return f"{_fmt_money_text('USD', usd, decimals=0)} (≈{krw:,.0f}원)"
+        if usd > 0:
+            return _fmt_money_text("USD", usd, decimals=0)
+        return ""
+    krw = float(h.get("eval_amount") or 0)
+    if krw <= 0 and qty > 0 and price > 0:
+        krw = qty * price
+    return f"{krw:,.0f}원" if krw > 0 else ""
+
+
+def format_holdings_list_html(
+    holdings: list[dict],
+    *,
+    fx_rate: float = 0,
+    max_rows: int = 15,
+    signal_only_extra: bool = False,
+) -> str:
+    """종목별 수익률·보유금액·신호 (간결)."""
+    if not holdings:
+        return "📭 보유 종목 없음"
+
+    def _safe_pr(h: dict) -> float:
+        try:
+            v = float(h.get("profit_rate", 0) or 0)
+            return v if math.isfinite(v) else 0.0
+        except Exception:
+            return 0.0
+
+    rows = sorted(holdings, key=_safe_pr, reverse=True)
+    lines = [f"📋 <b>보유 {len(holdings)}종목</b>", f"{'─' * 18}"]
+
+    for h in rows[:max_rows]:
+        pr = _safe_pr(h)
+        icon = "📈" if pr >= 0 else "📉"
+        tag = "US" if _holding_currency(h) == "USD" else "KR"
+        name = (h.get("name") or h.get("ticker", ""))[:10]
+        ticker = h.get("ticker", "")
+        eval_brief = _holding_eval_brief(h, fx_rate)
+        eval_part = f" · {eval_brief}" if eval_brief else ""
+
+        sig = ""
+        if h.get("should_sell") and h.get("sell_signal"):
+            sig = f" · ⚠️ {h['sell_signal'].get('reason_label', '매도')[:8]}"
+        elif not signal_only_extra and h.get("sell_signal"):
+            sig = ""
+
+        lines.append(
+            f"{icon} [{tag}] <b>{name}</b> {_pct_str(pr)}{eval_part}{sig}"
+        )
+
+    if len(rows) > max_rows:
+        lines.append(f"… 외 {len(rows) - max_rows}종목")
+
+    return "\n".join(lines)
+
+
+def _sell_result_amount_lines(result: dict) -> str:
+    """매도 결과 — 핵심 금액만."""
+    ccy = _signal_currency(result)
+    qty = int(result.get("quantity") or 0)
+    sell = float(result.get("sell_price") or result.get("current_price") or 0)
+    sell_total = result.get("sell_total")
+    profit_amount = result.get("profit_amount")
+    profit_krw = result.get("profit_amount_krw")
+
+    if sell_total is None and sell and qty:
+        sell_total = sell * qty
+    avg = float(result.get("avg_price") or 0)
+    if profit_amount is None and avg and sell and qty:
+        profit_amount = sell * qty - avg * qty
+
+    pnl = float(result.get("profit_rate", 0) or 0)
+    dec = 2 if ccy == "USD" else 0
+    profit_amt = float(profit_amount or 0)
+    if ccy == "USD":
+        profit_str = f"${profit_amt:+,.2f}"
+    else:
+        profit_str = f"{profit_amt:+,.0f}원"
+
+    line1 = (
+        f"🔢 {qty:,}주 · 매도 {_fmt_money_text(ccy, sell, decimals=dec)}"
+        f" → {_fmt_money_text(ccy, float(sell_total or 0), decimals=dec)}"
+    )
+    line2 = f"📈 <b>{_pct_str(pnl)}</b> · 손익 {profit_str}"
+    if ccy == "USD" and profit_krw is not None:
+        line2 += f" (≈{float(profit_krw):+,.0f}원)"
+    return f"{line1}\n{line2}"
+
+
 def _market_status_line() -> str:
     """한국/미국 시장 상태를 동시에 표시."""
     now = datetime.now(SEOUL_TZ)
@@ -93,27 +286,20 @@ class TelegramNotifier:
         pnl = signal.get("profit_rate", 0)
         pnl_str = f"+{pnl:.2f}%" if pnl >= 0 else f"{pnl:.2f}%"
 
-        trailing_info = ""
-        if signal.get("reason") == "TRAILING_STOP":
-            trailing_info = (
-                f"\n📌 고점: {signal.get('peak_price', 0):,.0f}원 "
-                f"(+{signal.get('peak_profit_rate', 0):.1f}%)"
-                f"\n📉 고점 대비: {signal.get('drop_from_peak_pct', 0):.1f}%"
-                f"\n⚙️ 적용 기준: {signal.get('trailing_source', '')}"
-            )
-
         ccy = _signal_currency(signal)
         price_str = _fmt_money_text(ccy, float(signal.get("current_price", 0)))
 
+        trailing_info = ""
+        if signal.get("reason") == "TRAILING_STOP":
+            trailing_info = (
+                f"\n📉 고점대비 {signal.get('drop_from_peak_pct', 0):.1f}%"
+            )
+
         msg = (
-            f"{reason_emoji} <b>매도 신호 감지</b>\n"
-            f"{'─' * 22}\n"
-            f"📊 <b>{signal.get('name', '')} ({signal.get('ticker', '')})</b>\n"
-            f"📋 사유: {signal.get('reason_label', '')}\n"
-            f"💰 현재가: {price_str}\n"
-            f"📈 수익률: <b>{pnl_str}</b>"
-            f"{trailing_info}\n"
-            f"🕐 {datetime.now().strftime('%H:%M:%S')}"
+            f"{reason_emoji} <b>매도 신호</b> {signal.get('reason_label', '')}\n"
+            f"<b>{signal.get('name', '')}</b> ({signal.get('ticker', '')})\n"
+            f"💰 {price_str} · <b>{pnl_str}</b>{trailing_info}\n"
+            f"🕐 {datetime.now(SEOUL_TZ).strftime('%H:%M')}"
         )
         self._send(msg)
 
@@ -125,26 +311,17 @@ class TelegramNotifier:
         icon = "✅" if success else "❌"
         status = "매도 완료" if success else "매도 실패"
 
-        pnl = result.get("profit_rate", 0)
-        pnl_str = f"+{pnl:.2f}%" if pnl >= 0 else f"{pnl:.2f}%"
-        pnl_icon = "📈" if pnl >= 0 else "📉"
-
         order_info = f"\n🧾 주문번호: {result.get('order_no', 'N/A')}" if success else \
                      f"\n⚠️ 오류: {result.get('error', '')}"
 
-        ccy = _signal_currency(result)
-        price_str = _fmt_money_text(ccy, float(result.get("current_price", 0)))
+        amount_block = _sell_result_amount_lines(result)
 
         msg = (
-            f"{icon} <b>{status}</b>\n"
-            f"{'─' * 22}\n"
-            f"📊 <b>{result.get('name', '')} ({result.get('ticker', '')})</b>\n"
-            f"📋 사유: {result.get('reason_label', result.get('reason', ''))}\n"
-            f"🔢 수량: {result.get('quantity', 0):,}주\n"
-            f"💰 기준가: {price_str}\n"
-            f"{pnl_icon} 수익률: <b>{pnl_str}</b>"
+            f"{icon} <b>{status}</b> · {result.get('reason_label', result.get('reason', ''))}\n"
+            f"<b>{result.get('name', '')}</b> ({result.get('ticker', '')})\n"
+            f"{amount_block}"
             f"{order_info}\n"
-            f"🕐 {datetime.now().strftime('%H:%M:%S')}"
+            f"🕐 {datetime.now(SEOUL_TZ).strftime('%H:%M')}"
         )
         self._send(msg)
 
@@ -155,136 +332,32 @@ class TelegramNotifier:
         if isinstance(report_type, str) and report_type.startswith("hourly_"):
             market = report_type.split("_", 1)[1].upper() if "_" in report_type else "KR"
             icon = "⏱️"
-            title = f"{market} 시간대 수익률 현황"
+            title = f"{market} 장중 체크"
         else:
             icon = "🌅" if report_type == "open" else "🌇"
-            title = "장 시작 전 현황" if report_type == "open" else "장 마감 후 결산"
+            title = "장 시작" if report_type == "open" else "장 마감"
 
-        seed = summary.get("seed_money", 0)
-        stocks_eval = float(summary.get("current_eval", 0))
-        eval_amt = float(summary.get("total_net_worth_krw", summary.get("current_eval", 0)))
-        eval_usd = summary.get("current_eval_usd") or 0.0
-        unrealized = summary.get("unrealized_pnl", 0)
-        unreal_usd = summary.get("unrealized_pnl_usd") or 0.0
-        total_rate = float(summary.get("return_pct_on_seed", summary.get("total_return_pct", 0)))
-        cost_rate = float(
-            summary.get("return_pct_on_holdings_cost", summary.get("return_on_cost_pct", 0.0))
+        seed = float(summary.get("seed_money", 0))
+        fx = float(summary.get("usd_krw_rate") or 0)
+        body = format_portfolio_summary_html(
+            summary, seed, title=f"{icon} {title}", show_holdings_count=False
         )
-        balance = summary.get("estimated_balance", 0)
-        pnl_seed = float(summary.get("pnl_vs_seed_krw", eval_amt - seed))
-        total_purchase = float(summary.get("total_purchase", 0.0))
+        holdings_block = format_holdings_list_html(holdings, fx_rate=fx, max_rows=12)
 
-        rate_icon = "📈" if total_rate >= 0 else "📉"
-        rate_str = f"+{total_rate:.2f}%" if total_rate >= 0 else f"{total_rate:.2f}%"
-        cost_icon = "📈" if cost_rate >= 0 else "📉"
-        cost_str = f"+{cost_rate:.2f}%" if cost_rate >= 0 else f"{cost_rate:.2f}%"
-        pnl_seed_str = f"+{pnl_seed:,.0f}" if pnl_seed >= 0 else f"{pnl_seed:,.0f}"
-        unreal_str = f"+{unrealized:,.0f}" if unrealized >= 0 else f"{unrealized:,.0f}"
-        eval_note = ""
-        if summary.get("fx_includes_usd") and summary.get("usd_krw_rate"):
-            usd_krw = summary.get("current_eval_usd_as_krw") or 0.0
-            eval_note = (
-                f"\n   · 1 USD ≈ {summary['usd_krw_rate']:,.2f}원\n"
-                f"   · 해외 평가(USD {eval_usd:,.2f}) → 약 {usd_krw:,.0f}원"
-            )
-        elif summary.get("fx_usd_excluded_from_krw_totals"):
-            eval_note = "\n⚠️ 해외(USD)는 환율 미조회로 원화 합계에서 제외"
-
-        unreal_note = ""
-        if summary.get("fx_includes_usd") and summary.get("has_overseas"):
-            uak = summary.get("unrealized_pnl_usd_as_krw")
-            if uak is not None:
-                unreal_note = f"\n   · 해외 미실현(원화): {(uak):+,.0f}원 (USD {_fmt_money_text('USD', unreal_usd)})"
-
-        def _safe_profit_rate(h: dict) -> float:
-            try:
-                v = float(h.get("profit_rate", 0) or 0)
-            except Exception:
-                return 0.0
-            return v if math.isfinite(v) else 0.0
-
-        us_holdings = [h for h in holdings if _holding_currency(h) == "USD"]
-        kr_holdings = [h for h in holdings if _holding_currency(h) != "USD"]
-
-        us_sorted = sorted(us_holdings, key=_safe_profit_rate, reverse=True)
-        kr_sorted = sorted(kr_holdings, key=_safe_profit_rate, reverse=True)
-
-        # 보유종목 상위 5개: KR/US가 같이 있으면 한쪽만 쏠리지 않도록 균형 표시
-        limit = 5
-        take_kr = min(len(kr_sorted), 3)
-        take_us = min(len(us_sorted), limit - take_kr)
-
-        # 양쪽 모두 존재하면 최소 1개씩은 보이게
-        if len(kr_sorted) > 0 and take_kr == 0:
-            take_kr = 1
-            take_us = min(len(us_sorted), limit - take_kr)
-        if len(us_sorted) > 0 and take_us == 0 and take_kr < limit:
-            take_us = 1
-
-        selected = []
-        selected.extend(kr_sorted[:take_kr])
-        selected.extend(us_sorted[:take_us])
-
-        if len(selected) < limit:
-            used_ids = set((h.get("ticker"), h.get("ovrs_excg_cd")) for h in selected)
-            candidates = []
-            for h in kr_sorted[take_kr:]:
-                key = (h.get("ticker"), h.get("ovrs_excg_cd"))
-                if key not in used_ids:
-                    candidates.append(h)
-            for h in us_sorted[take_us:]:
-                key = (h.get("ticker"), h.get("ovrs_excg_cd"))
-                if key not in used_ids:
-                    candidates.append(h)
-            candidates.sort(key=_safe_profit_rate, reverse=True)
-            selected.extend(candidates[: limit - len(selected)])
-
-        top_holdings = selected[:limit]
-        holdings_text = ""
-        for h in top_holdings:
-            pr = _safe_profit_rate(h)
-            pr_str = f"+{pr:.1f}%" if pr >= 0 else f"{pr:.1f}%"
-            ccy = _holding_currency(h)
-            mkt = "[미국]" if ccy == "USD" else "[국내]"
-            peak_drop = ""
-            if h.get("peak_info", {}).get("drop_from_peak_pct"):
-                d = h["peak_info"]["drop_from_peak_pct"]
-                peak_drop = f" (고점대비 {d:.1f}%)"
-            trailing_pct = ""
-            if h.get("trailing_config", {}).get("trailing_drop_pct"):
-                trailing_pct = f" | 트레일링 {h['trailing_config']['trailing_drop_pct']}%"
-            holdings_text += f"\n  {mkt} {h.get('name','')[:8]} {pr_str}{peak_drop}{trailing_pct}"
-
-        # 매도신호 있는 종목
-        signal_text = ""
         signals = [h for h in holdings if h.get("should_sell")]
+        signal_text = ""
         if signals:
-            signal_text = f"\n\n⚠️ <b>매도 신호 {len(signals)}건</b>"
-            for s in signals:
-                signal_text += f"\n  🔔 {s.get('name','')} — {s.get('sell_signal',{}).get('reason_label','')}"
-
-        cash_dep = float(summary.get("cash_deposit_krw") or 0.0)
-        incl_cash = bool(summary.get("seed_basis_includes_cash"))
-        acct_extra = ""
-        if incl_cash:
-            acct_extra = f"\n   · 주식 평가 합: {stocks_eval:,.0f}원"
-            if cash_dep > 0:
-                acct_extra += f" · 예수금(dnca): {cash_dep:,.0f}원"
+            parts = []
+            for s in signals[:5]:
+                lbl = (s.get("sell_signal") or {}).get("reason_label", "매도")
+                parts.append(f"{(s.get('name') or s.get('ticker', ''))[:8]}({lbl[:6]})")
+            extra = f" 외 {len(signals) - 5}건" if len(signals) > 5 else ""
+            signal_text = f"\n\n⚠️ <b>매도신호</b> " + ", ".join(parts) + extra
 
         msg = (
-            f"{icon} <b>{title}</b>  {datetime.now().strftime('%m/%d')}\n"
-            f"{'─' * 22}\n"
-            f"{_market_status_line()}\n"
-            f"💼 시드머니: {seed:,.0f}원\n"
-            f"📦 총자산(시드 기준): {eval_amt:,.0f}원{eval_note}{acct_extra}\n"
-            f"\n🌱 <b>시드머니 기준</b> 손익 {pnl_seed_str}원 · "
-            f"{rate_icon} 수익률 <b>{rate_str}</b>\n"
-            f"📊 <b>보유(매입원가)</b> 매입 {total_purchase:,.0f}원 · "
-            f"평가손익 {unreal_str}원{unreal_note}\n"
-            f"   {cost_icon} 매입 대비 수익률 <b>{cost_str}</b>\n"
-            f"🏦 추정 자산(평가합): {balance:,.0f}원\n"
-            f"\n📋 <b>보유종목 ({summary.get('holdings_count',0)}개)</b>"
-            f"{holdings_text}"
+            f"{body}\n"
+            f"\n{_market_status_line()}\n\n"
+            f"{holdings_block}"
             f"{signal_text}"
         )
         self._send(msg)
@@ -306,12 +379,13 @@ class TelegramNotifier:
             conf_icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(conf, "⚪")
             lines.append(f"  {conf_icon} {ticker} ({size}) → <b>{drop}%</b> [ATR {atr}%]")
 
-        holdings_text = "\n".join(lines)
+        holdings_text = "\n".join(lines[:12])
+        extra = f"\n… 외 {len(lines) - 12}종목" if len(lines) > 12 else ""
         msg = (
-            f"🤖 <b>AI 트레일링 비율 갱신</b>\n"
-            f"{'─' * 22}\n"
-            f"{holdings_text}\n"
-            f"\n🕐 {datetime.now().strftime('%m/%d %H:%M')}"
+            f"🤖 <b>트레일링 갱신</b>\n"
+            f"{'─' * 18}\n"
+            f"{holdings_text}{extra}\n"
+            f"🕐 {datetime.now(SEOUL_TZ).strftime('%m/%d %H:%M')}"
         )
         self._send(msg)
 

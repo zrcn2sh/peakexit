@@ -201,6 +201,7 @@ def manual_sell(ticker: str):
         "reason": "MANUAL",
         "reason_label": "수동 매도",
         "profit_rate": holding["profit_rate"],
+        "avg_price": holding["avg_price"],
         "current_price": holding["current_price"],
     }
     if holding.get("currency"):

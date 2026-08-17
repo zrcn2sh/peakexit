@@ -105,6 +105,84 @@ def _trading_meta_from_holding(holding: dict) -> dict:
     return meta
 
 
+def enrich_sell_execution_details(payload: dict) -> dict:
+    """매도 로그·텔레그램용: 매입/매도 금액·수익 합계·원화 환산 필드 보강."""
+    qty = int(payload.get("quantity") or 0)
+    ccy = payload.get("currency") or ("USD" if payload.get("ovrs_excg_cd") else "KRW")
+    dec = 2 if ccy == "USD" else 0
+
+    raw_avg = payload.get("avg_price")
+    has_avg = False
+    avg = 0.0
+    if raw_avg is not None and raw_avg != "":
+        try:
+            avg = float(raw_avg)
+            has_avg = avg > 0
+        except (TypeError, ValueError):
+            pass
+
+    sell = 0.0
+    if payload.get("sell_price") is not None:
+        try:
+            sell = float(payload["sell_price"])
+        except (TypeError, ValueError):
+            pass
+    elif payload.get("current_price") is not None:
+        try:
+            sell = float(payload["current_price"])
+        except (TypeError, ValueError):
+            pass
+    has_sell = sell > 0 and qty > 0
+
+    purchase_total = round(avg * qty, dec) if has_avg else None
+    sell_total = round(sell * qty, dec) if has_sell else None
+    profit_amount = (
+        round(sell_total - purchase_total, dec)
+        if has_avg and sell_total is not None and purchase_total is not None
+        else None
+    )
+
+    profit_rate = payload.get("profit_rate")
+    try:
+        profit_rate = float(profit_rate) if profit_rate is not None else None
+    except (TypeError, ValueError):
+        profit_rate = None
+    if profit_rate is None and purchase_total and purchase_total > 0 and sell_total is not None:
+        profit_rate = (sell_total - purchase_total) / purchase_total * 100
+
+    out = {
+        **payload,
+        "currency": ccy,
+        "avg_price": avg if has_avg else None,
+        "sell_price": sell if sell > 0 else None,
+        "purchase_total": purchase_total,
+        "sell_total": sell_total,
+        "profit_amount": profit_amount,
+        "profit_rate": float(profit_rate) if profit_rate is not None else None,
+    }
+
+    if ccy == "USD":
+        from app.services.fx_rate import get_usd_krw_rate
+
+        rate = get_usd_krw_rate()
+        out["usd_krw_rate"] = rate
+        if rate and sell_total is not None:
+            out["sell_total_krw"] = round(sell_total * rate)
+        if rate and profit_amount is not None:
+            out["profit_amount_krw"] = round(profit_amount * rate)
+        if rate and purchase_total is not None:
+            out["purchase_total_krw"] = round(purchase_total * rate)
+    else:
+        if sell_total is not None:
+            out["sell_total_krw"] = int(sell_total)
+        if profit_amount is not None:
+            out["profit_amount_krw"] = int(profit_amount)
+        if purchase_total is not None:
+            out["purchase_total_krw"] = int(purchase_total)
+
+    return out
+
+
 # ─────────────────────────────────────────────────
 # 매도 판단 엔진
 # ─────────────────────────────────────────────────
@@ -157,6 +235,7 @@ def evaluate_sell(
             "reason": "STOP_LOSS",
             "reason_label": f"손절 ({profit_rate:.2f}% ≤ {stop_loss}%)",
             "profit_rate": profit_rate,
+            "avg_price": avg_price,
             "current_price": current_price,
             "trailing_source": trailing_source,
             **_trading_meta_from_holding(holding),
@@ -171,6 +250,7 @@ def evaluate_sell(
             "reason": "TAKE_PROFIT",
             "reason_label": f"목표가 달성 ({profit_rate:.2f}% ≥ {take_profit}%)",
             "profit_rate": profit_rate,
+            "avg_price": avg_price,
             "current_price": current_price,
             "trailing_source": trailing_source,
             **_trading_meta_from_holding(holding),
@@ -192,6 +272,7 @@ def evaluate_sell(
                 f"{drop_from_peak:.1f}% 하락 / 기준: {trailing_source})"
             ),
             "profit_rate": profit_rate,
+            "avg_price": avg_price,
             "current_price": current_price,
             "peak_price": peak_info["peak_price"],
             "peak_profit_rate": peak_profit,
@@ -213,10 +294,11 @@ def execute_sell(signal: dict) -> dict:
     client = get_kis_client()
     ticker = signal["ticker"]
     qty = signal["quantity"]
+    sell_price = float(signal.get("sell_price") or signal.get("current_price") or 0)
 
     try:
         if signal.get("ovrs_excg_cd"):
-            result = client.sell_overseas_market_order(
+            result, sell_price = client.sell_overseas_market_order(
                 ticker,
                 qty,
                 ovrs_excg_cd=signal["ovrs_excg_cd"],
@@ -229,20 +311,22 @@ def execute_sell(signal: dict) -> dict:
             order_no = result.get("output", {}).get("odno", "N/A")
         peak_tracker.remove(ticker)
         logger.info(f"[매도완료] {ticker} {qty}주 주문번호={order_no}")
-        return {
+        return enrich_sell_execution_details({
             "success": True,
             "order_no": order_no,
             "message": f"{signal['name']} {qty}주 매도 완료",
             **signal,
-        }
+            "sell_price": sell_price,
+        })
     except Exception as e:
         logger.error(f"[매도실패] {ticker}: {e}")
-        return {
+        return enrich_sell_execution_details({
             "success": False,
             "error": str(e),
             "message": f"{signal['name']} 매도 실패: {e}",
             **signal,
-        }
+            "sell_price": sell_price,
+        })
 
 
 # ─────────────────────────────────────────────────
@@ -251,106 +335,226 @@ def execute_sell(signal: dict) -> dict:
 def calc_portfolio_summary(
     holdings: list[dict],
     seed_money: float,
-    trade_history: list[dict],
+    trade_history: Optional[list[dict]] = None,
     domestic_balance_output2: Optional[dict] = None,
+    *,
+    fetch_trades_for_adjustment: bool = True,
 ) -> dict:
     """
-    시드 대비 수익률(총자산 기준):
-    - 국내: 잔고조회 output2 의 순자산(nass_amt) 또는 총평가(tot_evlu_amt)가 있으면
-      그 값(예수금·주식 등 계좌 합산에 가까움) + 해외주식 원화환산 평가.
-    - output2 가 비어 있으면: 종목 평가금(output1 합) + 해외 (기존과 동일).
-
-    (output2 - 시드) / 시드 는 불가 — output2 는 dict 이므로, 위 스칼라 총자산으로
-    (total_net_worth - seed_money) / seed_money * 100 을 쓴다.
+    총자산·시드 수익률:
+    - 국내주식 + 국내예수금 + 해외주식(API evlu_amt 원화) + 해외예수금
+    - (+) 매도 미결제(T+2 국내 / T+1 해외)
+    - (−) 미수매수(nrcvb_buy_amt) · 신용대출(tot_loan_amt)
+    - 수익률(시드) = (총자산 - 시드) / 시드 × 100
     """
+    from app.core.portfolio_adjustment import (
+        calc_pending_sell_settlement_krw,
+        merge_trade_sources,
+        parse_domestic_liabilities_krw,
+        pending_settlement_mode,
+        resolve_account_base_krw,
+        trades_from_sell_log,
+    )
     from app.services.fx_rate import get_usd_krw_rate
 
     o = domestic_balance_output2 if isinstance(domestic_balance_output2, dict) else {}
+    tot_evlu_amt = _kis_float(o, "tot_evlu_amt")
+    nass_amt = _kis_float(o, "nass_amt")
     cash_deposit_krw = _kis_float(o, "dnca_tot_amt")
-    domestic_nass = _kis_float(o, "nass_amt")
-    domestic_tot_evlu = _kis_float(o, "tot_evlu_amt")
-    domestic_scts_evlu = _kis_float(o, "scts_evlu_amt")
+    scts_evlu_amt = _kis_float(o, "scts_evlu_amt")
+    output2_purchase = _kis_float(o, "pchs_amt_smtl_amt")
+    output2_unrealized = _kis_float(o, "evlu_pfls_smtl_amt")
 
     kr = [h for h in holdings if h.get("currency", "KRW") != "USD"]
     usd = [h for h in holdings if h.get("currency") == "USD"]
 
-    total_eval_krw = sum(h["eval_amount"] for h in kr)
-    total_purchase_krw = sum(h["purchase_amount"] for h in kr)
-    unrealized_pnl_krw = total_eval_krw - total_purchase_krw
+    holdings_eval_krw = sum(h["eval_amount"] for h in kr)
+    holdings_purchase_krw = sum(h["purchase_amount"] for h in kr)
+    holdings_eval_usd = sum(h["eval_amount"] for h in usd)
+    holdings_purchase_usd = sum(h["purchase_amount"] for h in usd)
 
-    total_eval_usd = sum(h["eval_amount"] for h in usd)
-    total_purchase_usd = sum(h["purchase_amount"] for h in usd)
-    unrealized_pnl_usd = total_eval_usd - total_purchase_usd
+    # 매도 보정용 환율만 조회 (총자산 합산에는 미사용)
+    fx_rate = get_usd_krw_rate()
 
-    rate = get_usd_krw_rate()
-    eval_usd_as_krw = (total_eval_usd * rate) if rate else None
-    purchase_usd_as_krw = (total_purchase_usd * rate) if rate else None
-    unreal_usd_as_krw = (unrealized_pnl_usd * rate) if rate else None
+    client = get_kis_client()
 
-    if usd and not rate:
-        logger.warning(
-            "해외(USD) 보유가 있으나 환율을 가져오지 못해 원화 합계·수익률에서 해외 평가가 제외되었습니다. "
-            "네트워크 확인 또는 FX_USD_KRW 환경변수로 수동 지정 가능."
-        )
+    try:
+        client.refresh_overseas_account_valuation()
+    except Exception as e:
+        logger.warning("해외 총자산 조회 실패: %s", e)
 
-    current_eval_combined = total_eval_krw + (eval_usd_as_krw or 0.0)
-    total_purchase_combined = total_purchase_krw + (purchase_usd_as_krw or 0.0)
-    unrealized_combined = current_eval_combined - total_purchase_combined
+    ov_v = client.get_last_overseas_valuation()
 
-    domestic_wealth_krw = 0.0
-    seed_basis_includes_cash = False
-    if domestic_nass > 0:
-        domestic_wealth_krw = domestic_nass
-        seed_basis_includes_cash = True
-    elif domestic_tot_evlu > 0:
-        domestic_wealth_krw = domestic_tot_evlu
-        seed_basis_includes_cash = True
+    trades = list(trade_history) if trade_history else []
+    if fetch_trades_for_adjustment:
+        try:
+            api_trades = client.get_combined_trade_history(days=14)
+        except Exception as e:
+            logger.warning("체결내역 API 조회 실패: %s", e)
+            api_trades = []
+        log_trades = trades_from_sell_log(max_days=14)
+        trades = merge_trade_sources(log_trades, api_trades, trades)
 
-    if seed_basis_includes_cash:
-        total_net_worth_krw = domestic_wealth_krw + (eval_usd_as_krw or 0.0)
+    pending_settle_krw, settle_detail = calc_pending_sell_settlement_krw(trades, fx_rate)
+    liabilities = parse_domestic_liabilities_krw(o)
+
+    try:
+        valuation_snapshot = client.get_account_valuation_snapshot(o)
+    except Exception as e:
+        logger.warning("계좌 평가 스냅샷 실패: %s", e)
+        valuation_snapshot = None
+
+    from app.core.account_valuation import DomesticValuation, build_asset_breakdown
+
+    base_info = resolve_account_base_krw(
+        o,
+        client.get_last_overseas_balance_eval_krw(),
+        holdings,
+        valuation_snapshot=valuation_snapshot,
+    )
+    account_base_method = base_info["account_base_method"]
+    uses_output2_tot = tot_evlu_amt > 0
+
+    if valuation_snapshot is not None:
+        dom_v = valuation_snapshot.domestic
+        ov_v = valuation_snapshot.overseas
     else:
-        total_net_worth_krw = current_eval_combined
+        dom_v = DomesticValuation.from_output2(o)
+        ov_v = client.get_last_overseas_valuation()
 
+    breakdown = build_asset_breakdown(
+        dom_v,
+        ov_v,
+        holdings,
+        fx_rate,
+        pending_sell_settlement_krw=pending_settle_krw,
+        pending_sell_settlement_dom_krw=float(settle_detail.get("domestic_krw") or 0),
+        pending_sell_settlement_ov_krw=float(settle_detail.get("overseas_krw") or 0),
+        nrcvb_buy_amt_krw=float(liabilities.get("nrcvb_buy_amt_krw") or 0),
+        credit_loan_krw=float(liabilities.get("credit_loan_krw") or 0),
+    )
+    account_base_krw = float(breakdown["subtotal_krw"])
+    total_net_worth_krw = float(breakdown["total_net_worth_krw"])
+    base_info["account_base_krw"] = account_base_krw
+    base_info["domestic_base_krw"] = breakdown["domestic_stocks_krw"] + breakdown["domestic_cash_krw"]
+    base_info["overseas_base_krw"] = breakdown["overseas_stocks_krw"] + breakdown["overseas_cash_krw"]
+    base_info["asset_breakdown"] = breakdown
+
+    purchase_usd_as_krw = (
+        round(holdings_purchase_usd * fx_rate) if fx_rate and holdings_purchase_usd > 0 else 0.0
+    )
+    stocks_eval_for_cost = float(breakdown["domestic_stocks_krw"]) + float(
+        breakdown["overseas_stocks_krw"]
+    )
+
+    # output2 매입/손익은 국내(TTTC8434R)만 — 해외 보유 시 보유 합산과 병합
+    if output2_purchase > 0 and not usd:
+        dom_purchase_krw = output2_purchase
+        total_purchase = dom_purchase_krw
+        unrealized_pnl = output2_unrealized
+        if unrealized_pnl == 0 and scts_evlu_amt > 0:
+            unrealized_pnl = scts_evlu_amt - output2_purchase
+    elif output2_purchase > 0 and usd:
+        dom_purchase_krw = output2_purchase
+        total_purchase = dom_purchase_krw + purchase_usd_as_krw
+        unrealized_pnl = stocks_eval_for_cost - total_purchase
+    else:
+        dom_purchase_krw = holdings_purchase_krw
+        total_purchase = dom_purchase_krw + purchase_usd_as_krw
+        if stocks_eval_for_cost > 0:
+            unrealized_pnl = stocks_eval_for_cost - total_purchase
+        else:
+            eval_usd_as_krw_fb = (holdings_eval_usd * fx_rate) if fx_rate else 0.0
+            current_eval_fb = holdings_eval_krw + eval_usd_as_krw_fb
+            unrealized_pnl = current_eval_fb - total_purchase
+
+    return_on_cost_pct = (
+        (unrealized_pnl / total_purchase * 100) if total_purchase > 0 else 0.0
+    )
     total_return_pct = (
         ((total_net_worth_krw - seed_money) / seed_money * 100) if seed_money > 0 else 0.0
     )
-    return_on_cost_pct = (
-        (unrealized_combined / total_purchase_combined * 100)
-        if total_purchase_combined > 0
-        else 0.0
-    )
+
+    stocks_eval_total = float(base_info["stocks_eval_total_krw"])
 
     return {
         "seed_money": seed_money,
-        "current_eval": current_eval_combined,
+        "current_eval": account_base_krw,
+        "current_eval_adjusted": total_net_worth_krw,
+        "account_tot_evlu_krw": account_base_krw,
+        "account_base_method": account_base_method,
+        "stocks_eval_total_krw": stocks_eval_total,
+        "stocks_eval_domestic_krw": float(breakdown["domestic_stocks_krw"]),
+        "stocks_eval_overseas_krw": float(breakdown["overseas_stocks_krw"]),
+        "overseas_eval_from_api_krw": float(base_info.get("overseas_eval_from_api_krw") or 0),
+        "overseas_usd_cash_krw": float(base_info.get("overseas_usd_cash_krw") or 0),
+        "overseas_valuation_source": base_info.get("overseas_valuation_source", ""),
+        "domestic_tot_evlu_component_krw": float(base_info.get("domestic_tot_evlu_krw") or 0),
+        "domestic_base_krw": float(base_info.get("domestic_base_krw") or 0),
+        "overseas_base_krw": float(base_info.get("overseas_base_krw") or 0),
+        "asset_breakdown": breakdown,
+        "domestic_stocks_krw": breakdown["domestic_stocks_krw"],
+        "domestic_cash_krw": breakdown["domestic_cash_krw"],
+        "overseas_stocks_usd": breakdown["overseas_stocks_usd"],
+        "overseas_stocks_krw": breakdown["overseas_stocks_krw"],
+        "overseas_cash_usd": breakdown["overseas_cash_usd"],
+        "overseas_cash_krw": breakdown["overseas_cash_krw"],
+        "asset_subtotal_krw": breakdown["subtotal_krw"],
+        "pending_sell_settlement_krw": breakdown.get("pending_sell_settlement_krw", 0),
+        "pending_sell_settlement_dom_krw": breakdown.get("pending_sell_settlement_dom_krw", 0),
+        "pending_sell_settlement_ov_krw": breakdown.get("pending_sell_settlement_ov_krw", 0),
+        "nrcvb_buy_amt_krw": breakdown.get("nrcvb_buy_amt_krw", 0),
+        "credit_loan_krw": breakdown.get("credit_loan_krw", 0),
+        "deductions_krw": breakdown.get("deductions_krw", 0),
         "total_net_worth_krw": total_net_worth_krw,
-        "current_eval_krw_domestic": total_eval_krw,
-        "current_eval_usd": total_eval_usd,
-        "current_eval_usd_as_krw": eval_usd_as_krw,
-        "total_purchase": total_purchase_combined,
-        "total_purchase_krw_domestic": total_purchase_krw,
-        "purchase_amount_usd_total": total_purchase_usd,
-        "purchase_amount_usd_as_krw": purchase_usd_as_krw,
-        "unrealized_pnl": unrealized_combined,
-        "unrealized_pnl_krw_domestic": unrealized_pnl_krw,
-        "unrealized_pnl_usd": unrealized_pnl_usd,
-        "unrealized_pnl_usd_as_krw": unreal_usd_as_krw,
+        "current_eval_krw_domestic": float(breakdown["domestic_stocks_krw"]),
+        "current_eval_usd": holdings_eval_usd,
+        "current_eval_usd_as_krw": None,
+        "total_purchase": total_purchase,
+        "total_purchase_krw_domestic": dom_purchase_krw,
+        "purchase_amount_usd_total": holdings_purchase_usd,
+        "purchase_amount_usd_as_krw": purchase_usd_as_krw if purchase_usd_as_krw > 0 else None,
+        "cost_basis_includes_overseas": bool(usd),
+        "unrealized_pnl": unrealized_pnl,
+        "unrealized_pnl_krw_domestic": output2_unrealized if uses_output2_tot else (holdings_eval_krw - holdings_purchase_krw),
+        "unrealized_pnl_usd": holdings_eval_usd - holdings_purchase_usd,
+        "unrealized_pnl_usd_as_krw": None,
         "cash_deposit_krw": cash_deposit_krw,
-        "domestic_nass_krw": domestic_nass,
-        "domestic_tot_evlu_krw": domestic_tot_evlu,
-        "domestic_scts_evlu_krw": domestic_scts_evlu,
-        "seed_basis_includes_cash": seed_basis_includes_cash,
+        "domestic_nass_krw": nass_amt,
+        "domestic_tot_evlu_krw": tot_evlu_amt,
+        "domestic_scts_evlu_krw": scts_evlu_amt,
+        "output2_purchase_krw": output2_purchase,
+        "output2_unrealized_krw": output2_unrealized,
+        "seed_basis_includes_cash": True,
+        "seed_basis_from_output2": uses_output2_tot,
         "pnl_vs_seed_krw": total_net_worth_krw - seed_money,
         "return_pct_on_seed": total_return_pct,
         "return_pct_on_holdings_cost": return_on_cost_pct,
         "return_on_cost_pct": return_on_cost_pct,
         "total_return_pct": total_return_pct,
         "estimated_balance": total_net_worth_krw,
+        "pending_sell_proceeds_krw": breakdown.get("pending_sell_settlement_krw", 0),
+        "pending_sell_settlement_krw": breakdown.get("pending_sell_settlement_krw", 0),
+        "pending_sell_settlement_dom_krw": breakdown.get("pending_sell_settlement_dom_krw", 0),
+        "pending_sell_settlement_ov_krw": breakdown.get("pending_sell_settlement_ov_krw", 0),
+        "pending_cash_adjustment_krw": breakdown.get("pending_sell_settlement_krw", 0),
+        "pending_sell_adjustments": [settle_detail] if settle_detail.get("total_krw") else [],
+        "pending_sell_settlement_detail": settle_detail,
+        "nrcvb_buy_amt_krw": breakdown.get("nrcvb_buy_amt_krw", 0),
+        "credit_loan_krw": breakdown.get("credit_loan_krw", 0),
+        "deductions_krw": breakdown.get("deductions_krw", 0),
+        "liabilities_detail": liabilities,
+        "hts_tot_evlu_krw": tot_evlu_amt,
+        "hts_nass_krw": nass_amt,
+        "pending_buy_eval_krw": 0.0,
+        "pending_buy_adjustments": [],
+        "pending_sell_settlement_mode": pending_settlement_mode(),
+        "pending_sell_trade_sources": len(trades),
         "holdings_count": len(holdings),
         "holdings_count_domestic": len(kr),
         "holdings_count_overseas": len(usd),
         "has_overseas": len(usd) > 0,
-        "usd_krw_rate": rate,
-        "fx_includes_usd": bool(rate and usd),
-        "fx_usd_excluded_from_krw_totals": bool(usd and not rate),
+        "usd_krw_rate": fx_rate,
+        "fx_includes_usd": False,
+        "fx_usd_excluded_from_krw_totals": False,
     }

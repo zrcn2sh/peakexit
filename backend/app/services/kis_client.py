@@ -6,9 +6,17 @@ import os
 import time
 import requests
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from typing import Optional
 import logging
+
+from app.core.account_valuation import (
+    OverseasValuation,
+    overseas_from_inquire_balance_nasd,
+    overseas_from_present_balance,
+)
+from app.core.portfolio_adjustment import parse_ccld_datetime_kst
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +117,11 @@ class KISApiClient:
         self._us_exch_cache: dict[str, tuple[str, str, float]] = {}
         # 국내 잔고조회(TTTC8434R) output2 — 예수금·총평가 등 (마지막 응답 기준)
         self._last_domestic_output2: dict = {}
+        # 해외 체결기준(CTRP6504R) / inquire-balance NASD 폴백 — 원화 총평가
+        self._last_overseas_eval_krw: float = 0.0
+        self._last_overseas_eval_detail: dict = {}
+        self._last_overseas_present_raw: dict = {}
+        self._last_overseas_valuation: OverseasValuation = OverseasValuation.empty()
 
     # ─────────────────────────────────────────
     # 인증
@@ -153,7 +166,15 @@ class KISApiClient:
     # 잔고 조회
     # ─────────────────────────────────────────
     def _row_from_domestic_item(self, item: dict) -> Optional[dict]:
-        qty = _kis_int(item, "hldg_qty")
+        # 당일 매수는 hldg_qty=0·ord_psbl_qty>0 인 경우가 있음
+        qty = _kis_int(
+            item,
+            "hldg_qty",
+            "ord_psbl_qty",
+            "thdt_buyqty",
+            "thdt_buy_qty",
+            "bfdy_buy_qty",
+        )
         if qty <= 0:
             return None
         ticker = (item.get("pdno") or "").strip()
@@ -182,6 +203,90 @@ class KISApiClient:
             "currency": "KRW",
         }
 
+    def fetch_domestic_inquire_balance_raw(self) -> dict:
+        """국내 inquire-balance(TTTC8434R) raw — output1 전체·output2 (페이징). /debug용."""
+        acct, suffix = self._split_account()
+        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
+        tr_id = "VTTC8434R" if self.is_mock else "TTTC8434R"
+        ctx_fk, ctx_nk = "", ""
+        all_output1: list[dict] = []
+        last_output2: dict = {}
+        last_data: dict = {}
+
+        for page in range(20):
+            params = {
+                "CANO": acct,
+                "ACNT_PRDT_CD": suffix,
+                "AFHR_FLPR_YN": "N",
+                "OFL_YN": "",
+                "INQR_DVSN": "02",
+                "UNPR_DVSN": "01",
+                "FUND_STTL_ICLD_YN": "N",
+                "FNCG_AMT_AUTO_RDPT_YN": "N",
+                "PRCS_DVSN": "00",
+                "CTX_AREA_FK100": ctx_fk,
+                "CTX_AREA_NK100": ctx_nk,
+            }
+            resp = requests.get(url, headers=self._headers(tr_id), params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            last_data = data
+            if str(data.get("rt_cd", "0")) != "0":
+                return {
+                    "tr_id": tr_id,
+                    "rt_cd": data.get("rt_cd"),
+                    "msg1": data.get("msg1"),
+                    "output1": all_output1,
+                    "output2": last_output2,
+                    "pages": page + 1,
+                    "error": data.get("msg1"),
+                }
+
+            for item in data.get("output1") or []:
+                if isinstance(item, dict):
+                    all_output1.append(dict(item))
+
+            out2 = data.get("output2")
+            if isinstance(out2, list) and out2:
+                out2 = out2[0] if isinstance(out2[0], dict) else {}
+            if isinstance(out2, dict) and out2:
+                last_output2 = dict(out2)
+                self._last_domestic_output2 = last_output2
+
+            tr_cont = (resp.headers.get("tr_cont") or data.get("tr_cont") or "").strip()
+            if tr_cont not in ("M", "F"):
+                break
+            ctx_fk = (last_output2.get("ctx_area_fk100") or "").strip()
+            ctx_nk = (last_output2.get("ctx_area_nk100") or "").strip()
+            if not ctx_fk and not ctx_nk:
+                break
+
+        return {
+            "tr_id": tr_id,
+            "rt_cd": last_data.get("rt_cd"),
+            "msg1": last_data.get("msg1"),
+            "output1": all_output1,
+            "output2": last_output2,
+            "pages": page + 1 if last_data else 0,
+        }
+
+    def fetch_overseas_inquire_balance_raw(self, ovrs_excg_cd: str) -> dict:
+        """해외 inquire-balance(TTTS3012R) raw — output1·output2. /debug용."""
+        data = self._fetch_overseas_inquire_balance(ovrs_excg_cd)
+        out1 = data.get("output1") or []
+        if not isinstance(out1, list):
+            out1 = [out1] if isinstance(out1, dict) else []
+        out1 = [dict(x) for x in out1 if isinstance(x, dict)]
+        out2 = self._overseas_output2_row(data)
+        return {
+            "tr_id": "VTTS3012R" if self.is_mock else "TTTS3012R",
+            "rt_cd": data.get("rt_cd"),
+            "msg1": data.get("msg1"),
+            "OVRS_EXCG_CD": ovrs_excg_cd,
+            "output1": out1,
+            "output2": dict(out2) if out2 else {},
+        }
+
     def _get_domestic_holdings(self) -> list[dict]:
         acct, suffix = self._split_account()
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
@@ -200,7 +305,7 @@ class KISApiClient:
                 "UNPR_DVSN": "01",
                 "FUND_STTL_ICLD_YN": "N",
                 "FNCG_AMT_AUTO_RDPT_YN": "N",
-                "PRCS_DVSN": "01",
+                "PRCS_DVSN": "00",
                 "CTX_AREA_FK100": ctx_fk,
                 "CTX_AREA_NK100": ctx_nk,
             }
@@ -232,6 +337,17 @@ class KISApiClient:
             if not ctx_fk and not ctx_nk:
                 break
 
+        try:
+            from app.core.portfolio_adjustment import merge_today_domestic_buys_into_holdings
+
+            today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+            ccld = self._fetch_domestic_daily_ccld(today, today)
+            all_items = merge_today_domestic_buys_into_holdings(
+                all_items, ccld, self.get_current_price
+            )
+        except Exception as e:
+            logger.warning("당일 매수 잔고 보완 실패: %s", e)
+
         logger.info("국내 잔고 %d종목 (페이징 포함)", len(all_items))
         return all_items
 
@@ -247,15 +363,31 @@ class KISApiClient:
         qcd = _ORDER_EXCD_TO_QUOTE.get(ocd, "NAS")
         avg_price = _kis_float(item, "pchs_avg_pric", "avg_prc", "frcr_pchs_avg_pric", "pchs_avg_pric")
         current_price = _kis_float(item, "prpr", "now_pric2", "ovrs_now_pric1", "stck_prpr")
-        eval_amount = _kis_float(item, "evlu_amt", "ovrs_stck_evlu_amt", "frcr_evlu_amt2")
+        from app.core.account_valuation import (
+            _stock_eval_krw_api_row,
+            _stock_eval_krw_inquire_row,
+            _stock_eval_krw_present_row,
+            _stock_eval_usd_row,
+        )
+
+        api_fx = _kis_float(item, "bass_exrt", "frst_bltn_exrt", "exrt")
+        eval_amount_usd = _stock_eval_usd_row(item)
+        if eval_amount_usd <= 0 and qty > 0 and current_price > 0:
+            eval_amount_usd = qty * current_price
+        eval_amount_krw = _stock_eval_krw_api_row(item, api_fx)
+        if eval_amount_krw <= 0:
+            eval_amount_krw = (
+                _stock_eval_krw_present_row(item, api_fx)
+                or _stock_eval_krw_inquire_row(item, api_fx)
+            )
+        if eval_amount_krw <= 0 and eval_amount_usd > 0 and api_fx > 0:
+            eval_amount_krw = round(eval_amount_usd * api_fx)
         purchase_amount = _kis_float(item, "pchs_amt", "frcr_pchs_amt1", "pchs_amt_smtl", "frcr_pchs_amt")
-        if eval_amount <= 0 and qty > 0 and current_price > 0:
-            eval_amount = qty * current_price
         if purchase_amount <= 0 and qty > 0 and avg_price > 0:
             purchase_amount = qty * avg_price
         profit_rate = _kis_float(item, "evlu_pfls_rt", "ovrs_evlu_pfls_rt", "evlu_pfls_rt")
-        if profit_rate == 0 and purchase_amount > 0:
-            profit_rate = (eval_amount - purchase_amount) / purchase_amount * 100
+        if profit_rate == 0 and purchase_amount > 0 and eval_amount_usd > 0:
+            profit_rate = (eval_amount_usd - purchase_amount) / purchase_amount * 100
         return {
             "ticker": ticker,
             "name": name,
@@ -263,7 +395,10 @@ class KISApiClient:
             "avg_price": avg_price,
             "current_price": current_price,
             "profit_rate": profit_rate,
-            "eval_amount": eval_amount,
+            "eval_amount": eval_amount_usd,
+            "eval_amount_usd": eval_amount_usd,
+            "eval_amount_krw": eval_amount_krw,
+            "fx_rate": api_fx,
             "purchase_amount": purchase_amount,
             "currency": "USD",
             "ovrs_excg_cd": ocd,
@@ -285,8 +420,8 @@ class KISApiClient:
                 rows.append(block)
         return rows
 
-    def _get_overseas_us_present_balance(self) -> list[dict]:
-        """미국 체결기준 현재잔고 (한 번에 조회, NATN_CD=840)."""
+    def _fetch_overseas_present_balance_raw(self) -> dict:
+        """미국 체결기준 현재잔고 CTRP6504R — 응답 전체."""
         acct, suffix = self._split_account()
         url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-present-balance"
         tr_id = "VCTRP6504R" if self.is_mock else "CTRP6504R"
@@ -307,6 +442,10 @@ class KISApiClient:
         data = resp.json()
         if str(data.get("rt_cd", "0")) != "0":
             raise KISBusinessError(data.get("msg1") or "해외 체결기준잔고 오류", data)
+        self._last_overseas_present_raw = data
+        return data
+
+    def _rows_from_present_balance_data(self, data: dict) -> list[dict]:
         raw_rows = self._collect_overseas_rows(data)
         out: list[dict] = []
         seen: set[str] = set()
@@ -319,34 +458,117 @@ class KISApiClient:
                 continue
             seen.add(key)
             out.append(d)
-        logger.info("해외(체결기준) 잔고 %d종목 (raw %d행)", len(out), len(raw_rows))
         return out
 
-    def _get_overseas_us_ttts_balance(self) -> list[dict]:
-        """거래소별 해외 잔고 (NASD/NYSE/AMEX) — 체결기준 API 실패 시 폴백."""
+    def _get_overseas_us_present_balance(self) -> list[dict]:
+        """미국 체결기준 현재잔고 종목 목록."""
+        data = self._last_overseas_present_raw
+        if not data:
+            data = self._fetch_overseas_present_balance_raw()
+        out = self._rows_from_present_balance_data(data)
+        logger.info("해외(체결기준) 잔고 %d종목", len(out))
+        return out
+
+    def _fetch_overseas_inquire_balance(self, ovrs_excg_cd: str) -> dict:
+        """해외주식 잔고조회 inquire-balance (거래소별 1회)."""
         acct, suffix = self._split_account()
         url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
         tr_id = "VTTS3012R" if self.is_mock else "TTTS3012R"
+        params = {
+            "CANO": acct,
+            "ACNT_PRDT_CD": suffix,
+            "OVRS_EXCG_CD": ovrs_excg_cd,
+            "TR_CRCY_CD": "USD",
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": "",
+        }
+        resp = requests.get(url, headers=self._headers(tr_id), params=params, timeout=15)
+        resp.raise_for_status()
+        return _kiss_check_rt_cd(resp.json())
+
+    @staticmethod
+    def _overseas_output2_row(data: dict) -> dict:
+        out2 = data.get("output2")
+        if isinstance(out2, list) and out2:
+            return out2[0] if isinstance(out2[0], dict) else {}
+        if isinstance(out2, dict):
+            return out2
+        return {}
+
+    def refresh_overseas_account_valuation(self) -> OverseasValuation:
+        """
+        해외 총자산(원화): CTRP6504R 체결기준 → 실패 시 TTTS3012R NASD 1회.
+        (NASD/NYSE/AMEX 3회 합산은 중복·과대 계상 방지를 위해 사용하지 않음)
+        """
+        valuation = OverseasValuation.empty()
+        present_data = self._last_overseas_present_raw
+        if not present_data:
+            try:
+                present_data = self._fetch_overseas_present_balance_raw()
+            except Exception as e:
+                logger.warning("해외 체결기준잔고 조회 실패: %s", e)
+                present_data = {}
+
+        if present_data:
+            valuation = overseas_from_present_balance(present_data)
+
+        if valuation.total_krw <= 0:
+            try:
+                nasd_data = self._fetch_overseas_inquire_balance("NASD")
+                valuation = overseas_from_inquire_balance_nasd(nasd_data)
+            except Exception as e:
+                logger.warning("해외 inquire-balance(NASD) 폴백 실패: %s", e)
+
+        self._last_overseas_valuation = valuation
+        self._last_overseas_eval_krw = valuation.total_krw
+        self._last_overseas_eval_detail = {
+            "overseas_eval_krw": valuation.total_krw,
+            "source": valuation.source,
+            "stocks_eval_krw": valuation.stocks_eval_krw,
+            "usd_cash_krw": valuation.usd_cash_krw,
+            "row_count": valuation.row_count,
+            "detail": valuation.detail,
+        }
+        if valuation.total_krw > 0:
+            logger.info(
+                "해외 총자산(%s): %s원 (주식 %s + USD예수 %s)",
+                valuation.source,
+                f"{valuation.total_krw:,.0f}",
+                f"{valuation.stocks_eval_krw:,.0f}",
+                f"{valuation.usd_cash_krw:,.0f}",
+            )
+        return valuation
+
+    def refresh_overseas_balance_eval_krw(self) -> dict:
+        """하위 호환 — refresh_overseas_account_valuation() 상세 dict."""
+        self.refresh_overseas_account_valuation()
+        return self._last_overseas_eval_detail
+
+    def get_last_overseas_balance_eval_krw(self) -> float:
+        return float(self._last_overseas_eval_krw or 0.0)
+
+    def get_last_overseas_valuation(self) -> OverseasValuation:
+        return self._last_overseas_valuation
+
+    def get_account_valuation_snapshot(self, domestic_output2: Optional[dict] = None):
+        """국내 output2 + 마지막 해외 평가 → 총자산 스냅샷."""
+        from app.core.account_valuation import AccountValuationSnapshot
+
+        o2 = domestic_output2 if domestic_output2 is not None else self._last_domestic_output2
+        ov = self._last_overseas_valuation
+        if ov.total_krw <= 0:
+            ov = self.refresh_overseas_account_valuation()
+        return AccountValuationSnapshot.build(o2, ov)
+
+    def _get_overseas_us_ttts_balance(self) -> list[dict]:
+        """거래소별 해외 잔고 (NASD/NYSE/AMEX) — 체결기준 API 실패 시 폴백."""
         merged: list[dict] = []
         seen: set[str] = set()
         for ovrs in ("NASD", "NYSE", "AMEX"):
-            params = {
-                "CANO": acct,
-                "ACNT_PRDT_CD": suffix,
-                "OVRS_EXCG_CD": ovrs,
-                "TR_CRCY_CD": "USD",
-                "CTX_AREA_FK200": "",
-                "CTX_AREA_NK200": "",
-            }
             try:
-                resp = requests.get(url, headers=self._headers(tr_id), params=params, timeout=15)
-                resp.raise_for_status()
-                data = resp.json()
+                data = self._fetch_overseas_inquire_balance(ovrs)
             except Exception as e:
                 logger.warning("해외 잔고(%s) HTTP 오류: %s", ovrs, e)
-                continue
-            if str(data.get("rt_cd", "0")) != "0":
-                logger.warning("해외 잔고(%s) API: %s", ovrs, data.get("msg1"))
                 continue
             for item in data.get("output1") or []:
                 row = self._normalize_overseas_balance_row(item, ovrs)
@@ -384,6 +606,10 @@ class KISApiClient:
                 time.sleep(0.35)
         overseas = list(merged_os.values())
         merged = domestic + overseas
+        try:
+            self.refresh_overseas_account_valuation()
+        except Exception as e:
+            logger.warning("해외 총자산 산출 실패: %s", e)
         logger.info("잔고 합계: 국내 %d + 해외(병합) %d = %d", len(domestic), len(overseas), len(merged))
         return merged
 
@@ -594,9 +820,10 @@ class KISApiClient:
         quantity: int,
         ovrs_excg_cd: str,
         quote_excd: Optional[str] = None,
-    ) -> dict:
+    ) -> tuple[dict, float]:
         """
         해외 매도 (모의는 지정가만 가능 → 최근가 지정가로 시장가에 준하게 처리).
+        Returns: (API 응답, 주문에 사용한 매도 단가)
         """
         acct, suffix = self._split_account()
         qex = quote_excd or _ORDER_EXCD_TO_QUOTE.get(ovrs_excg_cd.upper(), "NAS")
@@ -621,18 +848,105 @@ class KISApiClient:
         result = resp.json()
         _kiss_check_rt_cd(result)
         logger.info(f"[해외매도주문] {ticker} {quantity}주 {ovrs_excg_cd} 지정가={price_str}")
-        return result
+        return result, price
 
     # ─────────────────────────────────────────
-    # 거래내역 조회 (수익 계산용)
+    # 거래내역 조회 (수익 계산·잔고 보정용)
     # ─────────────────────────────────────────
-    def get_trade_history(self, days: int = 90) -> list[dict]:
-        """최근 N일 체결 내역"""
+    @staticmethod
+    def _normalize_domestic_ccld_row(item: dict) -> Optional[dict]:
+        ovrs_ticker = (item.get("ovrs_pdno") or "").strip()
+        pdno = (item.get("pdno") or "").strip()
+        excg = (item.get("excg_dvsn_cd") or item.get("tr_mket_cd") or "").strip().upper()
+        _US_EXCG = {"NASD", "NYSE", "AMEX", "NAS", "NYS", "AMS"}
+        is_us_row = bool(ovrs_ticker) or excg in _US_EXCG
+
+        ticker = ovrs_ticker or pdno
+        if not ticker:
+            return None
+        qty = _kis_int(item, "tot_ccld_qty")
+        if qty <= 0:
+            return None
+        ord_dt = item.get("ord_dt", "")
+        tm = item.get("ord_tmd") or item.get("ccld_tmd") or item.get("infm_tmd") or ""
+        ccld_kst = parse_ccld_datetime_kst(ord_dt, tm)
+        amt = _kis_float(
+            item,
+            "frcr_ccld_amt2",
+            "frcr_ccld_amt",
+            "tot_ccld_amt",
+        )
+        if amt <= 0:
+            pr = _kis_float(item, "avg_prvs", "ccld_unpr", "ft_ccld_unpr")
+            amt = pr * qty
+        side = (item.get("sll_buy_dvsn_cd") or "").strip()
+        ocd = None
+        if is_us_row:
+            ocd = excg if excg in _US_EXCG else "NASD"
+            if ocd in ("NAS", "NASD"):
+                ocd = "NASD"
+            elif ocd in ("NYS",):
+                ocd = "NYSE"
+            elif ocd in ("AMS",):
+                ocd = "AMEX"
+        return {
+            "region": "US" if is_us_row else "KR",
+            "date": ord_dt,
+            "ticker": ticker,
+            "name": item.get("prdt_name") or item.get("ovrs_item_name") or ticker,
+            "type": "BUY" if side == "02" else "SELL",
+            "quantity": qty,
+            "price": _kis_float(item, "avg_prvs", "ccld_unpr", "ft_ccld_unpr"),
+            "amount": amt,
+            "currency": "USD" if is_us_row else "KRW",
+            "fx_rate": _kis_float(item, "bass_exrt", "frst_bltn_exrt", "exrt"),
+            "ccld_at_kst": ccld_kst,
+            "ovrs_excg_cd": ocd,
+            "source": "api_domestic",
+        }
+
+    @staticmethod
+    def _normalize_overseas_ccld_row(item: dict, ovrs_excg_cd: str) -> Optional[dict]:
+        ticker = (item.get("ovrs_pdno") or item.get("pdno") or "").strip()
+        if not ticker:
+            return None
+        qty = _kis_int(item, "tot_ccld_qty", "ft_ccld_qty", "ccld_qty")
+        if qty <= 0:
+            return None
+        ord_dt = item.get("ord_dt", "")
+        tm = item.get("ord_tmd") or item.get("ccld_tmd") or item.get("infm_tmd") or ""
+        ccld_kst = parse_ccld_datetime_kst(ord_dt, tm)
+        amt = _kis_float(
+            item,
+            "frcr_ccld_amt2",
+            "frcr_ccld_amt",
+            "tot_ccld_amt",
+            "ccld_amt",
+        )
+        if amt <= 0:
+            pr = _kis_float(item, "ft_ccld_unpr", "avg_prvs", "ovrs_ccld_unpr")
+            amt = pr * qty
+        side = (item.get("sll_buy_dvsn_cd") or "").strip()
+        return {
+            "region": "US",
+            "date": ord_dt,
+            "ticker": ticker,
+            "name": item.get("prdt_name") or item.get("ovrs_item_name") or ticker,
+            "type": "BUY" if side == "02" else "SELL",
+            "quantity": qty,
+            "price": _kis_float(item, "ft_ccld_unpr", "avg_prvs", "ovrs_ccld_unpr"),
+            "amount": amt,
+            "currency": "USD",
+            "fx_rate": _kis_float(item, "bass_exrt", "frst_bltn_exrt", "exrt"),
+            "ccld_at_kst": ccld_kst,
+            "ovrs_excg_cd": (item.get("ovrs_excg_cd") or ovrs_excg_cd or "NASD").strip().upper(),
+            "source": "api_overseas",
+        }
+
+    def _fetch_domestic_daily_ccld(self, start: str, end: str) -> list[dict]:
         acct, suffix = self._split_account()
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
         tr_id = "VTTC8001R" if self.is_mock else "TTTC8001R"
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
         params = {
             "CANO": acct,
             "ACNT_PRDT_CD": suffix,
@@ -649,21 +963,118 @@ class KISApiClient:
             "CTX_AREA_FK100": "",
             "CTX_AREA_NK100": "",
         }
-        resp = requests.get(url, headers=self._headers(tr_id), params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        trades = []
-        for item in data.get("output1", []):
-            trades.append({
-                "date": item.get("ord_dt", ""),
-                "ticker": item.get("pdno", ""),
-                "name": item.get("prdt_name", ""),
-                "type": "BUY" if item.get("sll_buy_dvsn_cd") == "02" else "SELL",
-                "quantity": int(item.get("tot_ccld_qty", "0")),
-                "price": float(item.get("avg_prvs", "0")),
-                "amount": float(item.get("tot_ccld_amt", "0")),
-            })
+        trades: list[dict] = []
+        tr_cont = ""
+        fk100, nk100 = "", ""
+        for _ in range(20):
+            params["CTX_AREA_FK100"] = fk100
+            params["CTX_AREA_NK100"] = nk100
+            resp = requests.get(
+                url,
+                headers={**self._headers(tr_id), "tr_cont": tr_cont},
+                params=params,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = _kiss_check_rt_cd(resp.json())
+            for item in data.get("output1", []) or []:
+                row = self._normalize_domestic_ccld_row(item)
+                if row:
+                    trades.append(row)
+            fk100 = (data.get("ctx_area_fk100") or "").strip()
+            nk100 = (data.get("ctx_area_nk100") or "").strip()
+            tr_cont = (resp.headers.get("tr_cont") or data.get("tr_cont") or "").strip()
+            if tr_cont in ("M", "F") and (fk100 or nk100):
+                continue
+            break
         return trades
+
+    def _fetch_overseas_daily_ccld(self, start: str, end: str, ovrs_excg_cd: str) -> list[dict]:
+        acct, suffix = self._split_account()
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-daily-ccld"
+        tr_candidates = (
+            ["VTTT3035R", "VTTT3018R", "JTTT3035R"]
+            if self.is_mock
+            else ["TTTS3035R", "TTTS3018R", "JTTT3035R"]
+        )
+        params = {
+            "CANO": acct,
+            "ACNT_PRDT_CD": suffix,
+            "OVRS_EXCG_CD": ovrs_excg_cd,
+            "INQR_STRT_DT": start,
+            "INQR_END_DT": end,
+            "SLL_BUY_DVSN_CD": "00",
+            "INQR_DVSN": "00",
+            "PDNO": "",
+            "CCLD_DVSN": "01",
+            "ORD_GNO_BRNO": "",
+            "ODNO": "",
+            "INQR_DVSN_3": "00",
+            "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        }
+        last_err: Optional[Exception] = None
+        for tr_id in tr_candidates:
+            trades: list[dict] = []
+            tr_cont = ""
+            fk100, nk100 = "", ""
+            try:
+                for _ in range(20):
+                    params["CTX_AREA_FK100"] = fk100
+                    params["CTX_AREA_NK100"] = nk100
+                    resp = requests.get(
+                        url,
+                        headers={**self._headers(tr_id), "tr_cont": tr_cont},
+                        params=params,
+                        timeout=15,
+                    )
+                    resp.raise_for_status()
+                    data = _kiss_check_rt_cd(resp.json())
+                    for item in data.get("output1", []) or []:
+                        row = self._normalize_overseas_ccld_row(item, ovrs_excg_cd)
+                        if row:
+                            row["source"] = "api_overseas"
+                            trades.append(row)
+                    fk100 = (data.get("ctx_area_fk100") or "").strip()
+                    nk100 = (data.get("ctx_area_nk100") or "").strip()
+                    tr_cont = (resp.headers.get("tr_cont") or data.get("tr_cont") or "").strip()
+                    if tr_cont in ("M", "F") and (fk100 or nk100):
+                        continue
+                    break
+                return trades
+            except Exception as e:
+                last_err = e
+                logger.debug("해외 체결 TR %s (%s) 실패: %s", tr_id, ovrs_excg_cd, e)
+        if last_err:
+            raise last_err
+        return []
+
+    def get_trade_history(self, days: int = 90) -> list[dict]:
+        """국내 체결 내역 (하위 호환)."""
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+        try:
+            return self._fetch_domestic_daily_ccld(start, end)
+        except Exception as e:
+            logger.warning("국내 체결내역 조회 실패: %s", e)
+            return []
+
+    def get_combined_trade_history(self, days: int = 7) -> list[dict]:
+        """국내 + 미국(거래소별) 체결 내역 통합."""
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=max(days, 1))).strftime("%Y%m%d")
+        merged: list[dict] = []
+        try:
+            merged.extend(self._fetch_domestic_daily_ccld(start, end))
+        except Exception as e:
+            logger.warning("국내 체결내역 조회 실패: %s", e)
+        for ovrs in ("NASD", "NYSE", "AMEX"):
+            try:
+                merged.extend(self._fetch_overseas_daily_ccld(start, end, ovrs))
+            except Exception as e:
+                logger.warning("해외 체결내역(%s) 조회 실패: %s", ovrs, e)
+        return merged
 
 
 # 싱글톤
