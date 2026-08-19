@@ -466,16 +466,18 @@ def reconcile_domestic_stocks_krw(
     api_scts_evlu_amt: float,
     holdings: Optional[list[dict]],
 ) -> tuple[float, str]:
-    """output2 주식평가가 보유 합계보다 작으면 보유 기준(당일 매수 반영)."""
+    """
+    국내 주식평가 = 현재 보유 output1 합.
+    API scts/tot_evlu 는 당일 매도분이 T+2까지 남을 수 있어, 보유가 있으면 보유를 우선한다.
+    보유가 API보다 크면 당일 매수 보완으로 보유를 쓴다.
+    """
     from_holdings = holdings_domestic_stocks_krw(holdings or [])
     api_val = max(0.0, float(api_scts_evlu_amt or 0))
-    if from_holdings <= 0:
-        if api_val > 0:
-            return round(api_val), "api_scts_only"
-        return 0.0, "none"
-    if api_val <= 0 or api_val < from_holdings * 0.98:
+    if from_holdings > 0:
         return from_holdings, "holdings_eval_domestic"
-    return round(api_val), "api_scts_ok"
+    if api_val > 0:
+        return round(api_val), "api_scts_only"
+    return 0.0, "none"
 
 
 def holdings_overseas_eval_usd(holdings: list[dict]) -> float:
@@ -552,7 +554,8 @@ def build_asset_breakdown(
 
     dom_cash = max(0.0, domestic.dnca_tot_amt)
     dom_stocks, _dom_src = reconcile_domestic_stocks_krw(domestic.scts_evlu_amt, holdings)
-    if domestic.tot_evlu_amt > 0:
+    # tot_evlu_amt 는 당일 매도·D+2 예수 포함. 보유가 있으면 주식평가로 올리지 않는다.
+    if holdings_domestic_stocks_krw(holdings or []) <= 0 and domestic.tot_evlu_amt > 0:
         implied_stocks = max(0.0, domestic.tot_evlu_amt - dom_cash)
         if implied_stocks > dom_stocks:
             dom_stocks = implied_stocks

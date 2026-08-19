@@ -97,6 +97,7 @@
   .holdings-table tr:hover td,.atr-table tr:hover td{background:rgba(255,255,255,0.02)}
   .holding-eval-sub{font-size:var(--fs-2xs);color:var(--text2);font-weight:500;margin-top:5px;line-height:1.45}
   .holding-eval-sub .holding-eval-krw{color:var(--text);font-weight:600}
+  .holding-pnl-amt{font-size:var(--fs-2xs);font-weight:600;margin-top:5px;line-height:1.45}
   .ticker-badge{background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px 9px;font-size:var(--fs-xs);font-weight:700;letter-spacing:.5px;color:var(--accent2)}
   .signal-badge{display:inline-flex;align-items:center;gap:5px;border-radius:20px;padding:4px 11px;font-size:var(--fs-2xs);font-weight:600}
   .signal-sell{background:rgba(255,75,110,0.12);color:var(--danger);border:1px solid rgba(255,75,110,0.25)}
@@ -637,6 +638,57 @@ function footRow(label, amount, sign) {
   return '<tr><td>' + label + '</td><td' + cls + '>' + prefix + fmt(Math.abs(n)) + '원</td></tr>';
 }
 
+function holdingPurchaseAmounts(h, fxRate) {
+  const qty = Number(h.quantity) || 0;
+  const avg = Number(h.avg_price) || 0;
+  const raw = Number(h.purchase_amount);
+  const p = (Number.isFinite(raw) && raw > 0) ? raw : (qty > 0 && avg > 0 ? qty * avg : 0);
+  if (h.currency === 'USD') {
+    const rowFx = Number(h.fx_rate);
+    const fx = (Number.isFinite(rowFx) && rowFx > 0) ? rowFx : Number(fxRate);
+    const krw = p > 0 && Number.isFinite(fx) && fx > 0 ? Math.round(p * fx) : 0;
+    return { usd: p, krw };
+  }
+  return { usd: 0, krw: p };
+}
+
+function fmtSignedKrw(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return '—';
+  return (x >= 0 ? '+' : '') + fmt(x) + '원';
+}
+
+function fmtHoldingPnlHtml(h, fxRate) {
+  const ev = holdingEvalAmounts(h, fxRate);
+  const cost = holdingPurchaseAmounts(h, fxRate);
+  const qty = Number(h.quantity) || 0;
+  const avg = Number(h.avg_price) || 0;
+  const price = Number(h.current_price) || 0;
+  if (h.currency === 'USD') {
+    let pnlUsd = ev.usd - cost.usd;
+    if ((!Number.isFinite(pnlUsd) || (ev.usd <= 0 && cost.usd <= 0)) && qty > 0 && avg > 0 && price > 0)
+      pnlUsd = qty * (price - avg);
+    if (!Number.isFinite(pnlUsd)) return '';
+    let pnlKrw = (ev.krw > 0 && cost.krw > 0) ? ev.krw - cost.krw : 0;
+    if ((!Number.isFinite(pnlKrw) || pnlKrw === 0) && pnlUsd !== 0) {
+      const rowFx = Number(h.fx_rate);
+      const fx = (Number.isFinite(rowFx) && rowFx > 0) ? rowFx : Number(fxRate);
+      if (Number.isFinite(fx) && fx > 0) pnlKrw = Math.round(pnlUsd * fx);
+    }
+    let html = '<div class="holding-pnl-amt">';
+    html += fmtLogProfit(h, pnlUsd);
+    if (Number.isFinite(pnlKrw) && pnlKrw !== 0)
+      html += '<br><span style="font-weight:500;color:var(--text2)">≈' + fmtSignedKrw(pnlKrw) + '</span>';
+    html += '</div>';
+    return html;
+  }
+  let pnl = ev.krw - cost.krw;
+  if ((!Number.isFinite(pnl) || (ev.krw <= 0 && cost.krw <= 0)) && qty > 0 && avg > 0 && price > 0)
+    pnl = qty * (price - avg);
+  if (!Number.isFinite(pnl)) return '';
+  return '<div class="holding-pnl-amt">' + fmtSignedKrw(pnl) + '</div>';
+}
+
 function fmtHoldingValueHtml(h, fxRate) {
   const ev = holdingEvalAmounts(h, fxRate);
   if (h.currency === 'USD') {
@@ -833,10 +885,16 @@ function renderMetrics(s) {
   const seedR = Number(s.return_pct_on_seed ?? s.total_return_pct);
   re.textContent = fmtPct(seedR);
   re.className = 'value '+(seedR >= 0 ? 'up' : 'down');
-  document.getElementById('m-rate-sub').textContent = '시드머니 기준 (상세는 아래)';
+  const pvs = displayEval - Number(s.seed_money);
+  const elRateSub = document.getElementById('m-rate-sub');
+  if (elRateSub) {
+    elRateSub.textContent = Number.isFinite(pvs)
+      ? ((pvs >= 0 ? '+' : '') + fmt(pvs) + '원 · 시드머니 기준')
+      : '시드머니 기준';
+    elRateSub.className = 'sub ' + (pvs >= 0 ? 'up' : 'down');
+  }
   document.getElementById('m-count').textContent = s.holdings_count+'개';
 
-  const pvs = displayEval - Number(s.seed_money);
   const elSpnl = document.getElementById('sb-seed-pnl');
   const elSrate = document.getElementById('sb-seed-rate');
   const elCb = document.getElementById('sb-cost-basis');
@@ -911,6 +969,7 @@ function renderHoldings(holdings) {
       <td>
         <div style="color:${pColor};font-weight:600">${fmtPct(p)}</div>
         <div class="progress-bar"><div class="progress-fill" style="width:${pBarW}%;background:${pColor}"></div></div>
+        <div style="color:${pColor}">${fmtHoldingPnlHtml(h, _lastFxRate)}</div>
       </td>
       <td style="color:${dropColor};font-size:var(--fs-sm)">${peak.peak_price ? fmtCur(h, peak.peak_price)+'<br>'+fmtPct(dropPct):'—'}</td>
       <td style="font-size:var(--fs-xs)">
