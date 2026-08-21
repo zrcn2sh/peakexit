@@ -579,6 +579,21 @@ def is_pending_sell_settlement(trade: dict, now_kst: Optional[datetime] = None) 
     return settle > today
 
 
+def is_pending_buy_settlement(trade: dict, now_kst: Optional[datetime] = None) -> bool:
+    """체결됐으나 결제일 전 매수(T+2/T+1 미결제). 미결제 매도 대금으로 매수한 경우 총자산 이중 가산 방지."""
+    if (trade.get("type") or "").upper() != "BUY":
+        return False
+    settle = trade_settlement_date(trade)
+    if not settle:
+        return False
+    now = now_kst or datetime.now(SEOUL_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=SEOUL_TZ)
+    region = trade.get("region", "KR")
+    today = now.astimezone(NY_TZ).date() if region == "US" else now.astimezone(SEOUL_TZ).date()
+    return settle > today
+
+
 def trade_settlement_amount_krw(trade: dict, usd_krw_rate: Optional[float]) -> float:
     """체결금액 → 원화 (해외는 체결 API 환율 우선)."""
     amt = float(trade.get("amount") or 0)
@@ -648,6 +663,70 @@ def calc_pending_sell_settlement_krw(
     if total > 0:
         logger.info(
             "매도 미결제 +%s원 (국내 T+2 %s + 해외 T+1 %s)",
+            f"{total:,.0f}",
+            f"{dom_krw:,.0f}",
+            f"{ov_krw:,.0f}",
+        )
+    return total, detail
+
+
+def calc_pending_buy_settlement_krw(
+    trades: list[dict],
+    usd_krw_rate: Optional[float],
+    now_kst: Optional[datetime] = None,
+) -> tuple[float, dict]:
+    """
+    매수 미결제 금액 (원화).
+    - 국내: T+2 미결제 BUY
+    - 해외: T+1 미결제 BUY
+    미결제 매도 대금으로 재매수한 금액 — 총자산에서 매도 미결제와 상계한다.
+    """
+    now = now_kst or datetime.now(SEOUL_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=SEOUL_TZ)
+
+    dom_krw = 0.0
+    ov_krw = 0.0
+    dom_rows: list[dict] = []
+    ov_rows: list[dict] = []
+
+    for tr in trades or []:
+        if not is_pending_buy_settlement(tr, now):
+            continue
+        amt_krw = trade_settlement_amount_krw(tr, usd_krw_rate)
+        if amt_krw <= 0:
+            continue
+        settle = trade_settlement_date(tr)
+        row = {
+            "ticker": tr.get("ticker"),
+            "name": tr.get("name"),
+            "region": tr.get("region", "KR"),
+            "amount_krw": amt_krw,
+            "settlement_date": settle.isoformat() if settle else "",
+            "trade_date": trade_calendar_date(tr) or "",
+            "source": tr.get("source", ""),
+        }
+        if tr.get("region") == "US":
+            ov_krw += amt_krw
+            ov_rows.append(row)
+        else:
+            dom_krw += amt_krw
+            dom_rows.append(row)
+
+    total = round(dom_krw + ov_krw)
+    detail = {
+        "method": "pending_buy_settlement",
+        "domestic_krw": round(dom_krw),
+        "overseas_krw": round(ov_krw),
+        "total_krw": total,
+        "domestic_trades": dom_rows,
+        "overseas_trades": ov_rows,
+        "domestic_count": len(dom_rows),
+        "overseas_count": len(ov_rows),
+    }
+    if total > 0:
+        logger.info(
+            "매수 미결제 −%s원 (국내 T+2 %s + 해외 T+1 %s)",
             f"{total:,.0f}",
             f"{dom_krw:,.0f}",
             f"{ov_krw:,.0f}",

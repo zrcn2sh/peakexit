@@ -34,22 +34,34 @@ def _signal_currency(signal: dict) -> str:
 
 
 def format_pending_sell_compact(summary: dict) -> str:
-    """매도 미결제·차감 — 한 줄 요약."""
-    pending = float(
-        summary.get("pending_sell_settlement_krw")
+    """매도·매수 미결제·차감 — 한 줄 요약."""
+    pending_net = float(
+        summary.get("pending_settlement_net_krw")
+        or summary.get("pending_sell_settlement_krw")
         or summary.get("pending_cash_adjustment_krw")
         or summary.get("pending_sell_proceeds_krw")
         or 0
     )
+    pending_gross = float(summary.get("pending_sell_settlement_gross_krw") or 0)
+    pending_buy = float(summary.get("pending_buy_settlement_krw") or 0)
     dom_p = float(summary.get("pending_sell_settlement_dom_krw") or 0)
     ov_p = float(summary.get("pending_sell_settlement_ov_krw") or 0)
     deduct = float(summary.get("deductions_krw") or 0)
-    if pending <= 0 and deduct <= 0:
+    if pending_net == 0 and pending_gross <= 0 and pending_buy <= 0 and deduct <= 0:
         return ""
     lines: list[str] = []
-    if pending > 0:
+    if pending_gross > 0 or pending_buy > 0:
+        if pending_buy > 0:
+            lines.append(
+                f"   └ 미결제 <b>{pending_net:+,.0f}원</b> "
+                f"(매도 +{pending_gross:,.0f} − 매수 {pending_buy:,.0f})\n"
+            )
+        elif pending_net > 0:
+            detail = f"국내 T+2 {dom_p:,.0f} + 해외 T+1 {ov_p:,.0f}".strip()
+            lines.append(f"   └ 미결제 매도 <b>+{pending_net:,.0f}원</b> ({detail})\n")
+    elif pending_net > 0:
         detail = f"국내 T+2 {dom_p:,.0f} + 해외 T+1 {ov_p:,.0f}".strip()
-        lines.append(f"   └ 미결제 매도 <b>+{pending:,.0f}원</b> ({detail})\n")
+        lines.append(f"   └ 미결제 매도 <b>+{pending_net:,.0f}원</b> ({detail})\n")
     if deduct > 0:
         nrcvb = float(summary.get("nrcvb_buy_amt_krw") or 0)
         loan = float(summary.get("credit_loan_krw") or 0)

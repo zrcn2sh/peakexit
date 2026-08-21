@@ -343,11 +343,13 @@ def calc_portfolio_summary(
     """
     총자산·시드 수익률:
     - 국내주식 + 국내예수금 + 해외주식(API evlu_amt 원화) + 해외예수금
-    - (+) 매도 미결제(T+2 국내 / T+1 해외)
+    - (+) 매도 미결제(T+2 국내 / T+1 해외) − (−) 매수 미결제(T+2/T+1)
     - (−) 미수매수(nrcvb_buy_amt) · 신용대출(tot_loan_amt)
     - 수익률(시드) = (총자산 - 시드) / 시드 × 100
     """
     from app.core.portfolio_adjustment import (
+        calc_pending_buy_eval_krw,
+        calc_pending_buy_settlement_krw,
         calc_pending_sell_settlement_krw,
         merge_trade_sources,
         parse_domestic_liabilities_krw,
@@ -395,7 +397,9 @@ def calc_portfolio_summary(
         log_trades = trades_from_sell_log(max_days=14)
         trades = merge_trade_sources(log_trades, api_trades, trades)
 
-    pending_settle_krw, settle_detail = calc_pending_sell_settlement_krw(trades, fx_rate)
+    pending_sell_gross_krw, settle_detail = calc_pending_sell_settlement_krw(trades, fx_rate)
+    pending_buy_settle_krw, buy_settle_detail = calc_pending_buy_settlement_krw(trades, fx_rate)
+    pending_buy_eval_krw, pending_buy_eval_details = calc_pending_buy_eval_krw(holdings, trades)
     liabilities = parse_domestic_liabilities_krw(o)
 
     try:
@@ -427,9 +431,13 @@ def calc_portfolio_summary(
         ov_v,
         holdings,
         fx_rate,
-        pending_sell_settlement_krw=pending_settle_krw,
+        pending_sell_settlement_krw=pending_sell_gross_krw,
         pending_sell_settlement_dom_krw=float(settle_detail.get("domestic_krw") or 0),
         pending_sell_settlement_ov_krw=float(settle_detail.get("overseas_krw") or 0),
+        pending_buy_settlement_krw=pending_buy_settle_krw,
+        pending_buy_settlement_dom_krw=float(buy_settle_detail.get("domestic_krw") or 0),
+        pending_buy_settlement_ov_krw=float(buy_settle_detail.get("overseas_krw") or 0),
+        pending_buy_krw=pending_buy_eval_krw,
         nrcvb_buy_amt_krw=float(liabilities.get("nrcvb_buy_amt_krw") or 0),
         credit_loan_krw=float(liabilities.get("credit_loan_krw") or 0),
     )
@@ -500,9 +508,14 @@ def calc_portfolio_summary(
         "overseas_cash_usd": breakdown["overseas_cash_usd"],
         "overseas_cash_krw": breakdown["overseas_cash_krw"],
         "asset_subtotal_krw": breakdown["subtotal_krw"],
-        "pending_sell_settlement_krw": breakdown.get("pending_sell_settlement_krw", 0),
+        "pending_sell_settlement_krw": breakdown.get("pending_settlement_net_krw", breakdown.get("pending_sell_settlement_krw", 0)),
+        "pending_sell_settlement_gross_krw": breakdown.get("pending_sell_settlement_gross_krw", 0),
         "pending_sell_settlement_dom_krw": breakdown.get("pending_sell_settlement_dom_krw", 0),
         "pending_sell_settlement_ov_krw": breakdown.get("pending_sell_settlement_ov_krw", 0),
+        "pending_buy_settlement_krw": breakdown.get("pending_buy_settlement_krw", 0),
+        "pending_buy_settlement_dom_krw": breakdown.get("pending_buy_settlement_dom_krw", 0),
+        "pending_buy_settlement_ov_krw": breakdown.get("pending_buy_settlement_ov_krw", 0),
+        "pending_settlement_net_krw": breakdown.get("pending_settlement_net_krw", 0),
         "nrcvb_buy_amt_krw": breakdown.get("nrcvb_buy_amt_krw", 0),
         "credit_loan_krw": breakdown.get("credit_loan_krw", 0),
         "deductions_krw": breakdown.get("deductions_krw", 0),
@@ -533,21 +546,16 @@ def calc_portfolio_summary(
         "return_on_cost_pct": return_on_cost_pct,
         "total_return_pct": total_return_pct,
         "estimated_balance": total_net_worth_krw,
-        "pending_sell_proceeds_krw": breakdown.get("pending_sell_settlement_krw", 0),
-        "pending_sell_settlement_krw": breakdown.get("pending_sell_settlement_krw", 0),
-        "pending_sell_settlement_dom_krw": breakdown.get("pending_sell_settlement_dom_krw", 0),
-        "pending_sell_settlement_ov_krw": breakdown.get("pending_sell_settlement_ov_krw", 0),
-        "pending_cash_adjustment_krw": breakdown.get("pending_sell_settlement_krw", 0),
+        "pending_sell_proceeds_krw": breakdown.get("pending_settlement_net_krw", 0),
+        "pending_cash_adjustment_krw": breakdown.get("pending_settlement_net_krw", 0),
         "pending_sell_adjustments": [settle_detail] if settle_detail.get("total_krw") else [],
         "pending_sell_settlement_detail": settle_detail,
-        "nrcvb_buy_amt_krw": breakdown.get("nrcvb_buy_amt_krw", 0),
-        "credit_loan_krw": breakdown.get("credit_loan_krw", 0),
-        "deductions_krw": breakdown.get("deductions_krw", 0),
+        "pending_buy_settlement_detail": buy_settle_detail,
         "liabilities_detail": liabilities,
         "hts_tot_evlu_krw": tot_evlu_amt,
         "hts_nass_krw": nass_amt,
-        "pending_buy_eval_krw": 0.0,
-        "pending_buy_adjustments": [],
+        "pending_buy_eval_krw": pending_buy_eval_krw,
+        "pending_buy_adjustments": pending_buy_eval_details,
         "pending_sell_settlement_mode": pending_settlement_mode(),
         "pending_sell_trade_sources": len(trades),
         "holdings_count": len(holdings),

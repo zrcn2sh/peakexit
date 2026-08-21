@@ -542,13 +542,18 @@ def build_asset_breakdown(
     pending_sell_settlement_krw: float = 0.0,
     pending_sell_settlement_dom_krw: float = 0.0,
     pending_sell_settlement_ov_krw: float = 0.0,
+    pending_buy_settlement_krw: float = 0.0,
+    pending_buy_settlement_dom_krw: float = 0.0,
+    pending_buy_settlement_ov_krw: float = 0.0,
     nrcvb_buy_amt_krw: float = 0.0,
     credit_loan_krw: float = 0.0,
 ) -> dict:
     """
     추정 총자산 =
       국내주식 + 국내예수금 + 해외주식(원, API evlu_amt) + 해외예수금(원)
-      + 매도미결제(T+2/T+1) − 미수매수(nrcvb) − 신용대출(tot_loan)
+      + 미결제 순현금(매도 T+2/T+1 − 매수 T+2/T+1)
+      + 잔고 미반영 당일매수(pending_buy_krw)
+      − 미수매수(nrcvb) − 신용대출(tot_loan)
     """
     fx = float(fx_rate or overseas.fx_rate or 0)
 
@@ -574,20 +579,28 @@ def build_asset_breakdown(
 
     ov_cash_usd, ov_cash_krw = overseas_cash_from_valuation(overseas, fx)
 
-    pending_settle = max(0.0, float(pending_sell_settlement_krw or 0))
-    pending_settle_dom = max(0.0, float(pending_sell_settlement_dom_krw or 0))
-    pending_settle_ov = max(0.0, float(pending_sell_settlement_ov_krw or 0))
-    if pending_settle <= 0 and (pending_settle_dom > 0 or pending_settle_ov > 0):
-        pending_settle = pending_settle_dom + pending_settle_ov
+    pending_sell_gross = max(0.0, float(pending_sell_settlement_krw or 0))
+    pending_sell_dom = max(0.0, float(pending_sell_settlement_dom_krw or 0))
+    pending_sell_ov = max(0.0, float(pending_sell_settlement_ov_krw or 0))
+    if pending_sell_gross <= 0 and (pending_sell_dom > 0 or pending_sell_ov > 0):
+        pending_sell_gross = pending_sell_dom + pending_sell_ov
+
+    pending_buy_settle = max(0.0, float(pending_buy_settlement_krw or 0))
+    pending_buy_dom = max(0.0, float(pending_buy_settlement_dom_krw or 0))
+    pending_buy_ov = max(0.0, float(pending_buy_settlement_ov_krw or 0))
+    if pending_buy_settle <= 0 and (pending_buy_dom > 0 or pending_buy_ov > 0):
+        pending_buy_settle = pending_buy_dom + pending_buy_ov
+
+    pending_settle_net = pending_sell_gross - pending_buy_settle
 
     legacy_pending = max(0.0, float(pending_sell_krw or 0))
-    pending_buy = max(0.0, float(pending_buy_krw or 0))
+    pending_buy_eval = max(0.0, float(pending_buy_krw or 0))
     nrcvb = max(0.0, float(nrcvb_buy_amt_krw or domestic.nrcvb_buy_amt or 0))
     credit_loan = max(0.0, float(credit_loan_krw or domestic.tot_loan_amt or 0))
     deductions = nrcvb + credit_loan
 
     subtotal = dom_stocks + dom_cash + ov_stocks_krw + ov_cash_krw
-    total = subtotal + pending_settle + pending_buy + legacy_pending - deductions
+    total = subtotal + pending_settle_net + pending_buy_eval + legacy_pending - deductions
 
     return {
         "domestic_stocks_krw": round(dom_stocks),
@@ -597,14 +610,19 @@ def build_asset_breakdown(
         "overseas_cash_usd": round(ov_cash_usd, 2),
         "overseas_cash_krw": round(ov_cash_krw),
         "subtotal_krw": round(subtotal),
-        "pending_sell_settlement_krw": round(pending_settle),
-        "pending_sell_settlement_dom_krw": round(pending_settle_dom),
-        "pending_sell_settlement_ov_krw": round(pending_settle_ov),
+        "pending_sell_settlement_gross_krw": round(pending_sell_gross),
+        "pending_sell_settlement_dom_krw": round(pending_sell_dom),
+        "pending_sell_settlement_ov_krw": round(pending_sell_ov),
+        "pending_buy_settlement_krw": round(pending_buy_settle),
+        "pending_buy_settlement_dom_krw": round(pending_buy_dom),
+        "pending_buy_settlement_ov_krw": round(pending_buy_ov),
+        "pending_settlement_net_krw": round(pending_settle_net),
+        "pending_sell_settlement_krw": round(pending_settle_net),
         "nrcvb_buy_amt_krw": round(nrcvb),
         "credit_loan_krw": round(credit_loan),
         "deductions_krw": round(deductions),
-        "pending_sell_krw": round(legacy_pending or pending_settle),
-        "pending_buy_krw": round(pending_buy),
+        "pending_sell_krw": round(legacy_pending or pending_settle_net),
+        "pending_buy_krw": round(pending_buy_eval),
         "total_net_worth_krw": round(total),
         "fx_usd_krw": round(fx, 2) if fx else None,
         "overseas_stocks_source": "api_evlu_x_bass_exrt",

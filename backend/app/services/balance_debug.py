@@ -134,6 +134,7 @@ def build_hts_comparison_section(client, snapshot: dict) -> str:
     """한투 앱 총자산 1:1 비교용 항목별 원화."""
     from app.core.account_valuation import kis_float
     from app.core.portfolio_adjustment import (
+        calc_pending_buy_settlement_krw,
         calc_pending_sell_settlement_krw,
         merge_trade_sources,
         parse_domestic_liabilities_krw,
@@ -164,7 +165,9 @@ def build_hts_comparison_section(client, snapshot: dict) -> str:
     except Exception as e:
         logger.warning("비교용 체결내역 조회 실패: %s", e)
 
-    pending_total, pending_detail = calc_pending_sell_settlement_krw(trades, fx)
+    pending_sell_total, pending_detail = calc_pending_sell_settlement_krw(trades, fx)
+    pending_buy_total, pending_buy_detail = calc_pending_buy_settlement_krw(trades, fx)
+    pending_net = pending_sell_total - pending_buy_total
     liabilities = parse_domestic_liabilities_krw(o2)
     loan_o1 = _sum_domestic_output1_loan(o1)
 
@@ -183,6 +186,9 @@ def build_hts_comparison_section(client, snapshot: dict) -> str:
         "",
         f"(+) 매도미결제 국내 T+2  {_fmt_krw(pending_detail.get('domestic_krw', 0))}  ({pending_detail.get('domestic_count', 0)}건)",
         f"(+) 매도미결제 해외 T+1  {_fmt_krw(pending_detail.get('overseas_krw', 0))}  ({pending_detail.get('overseas_count', 0)}건)",
+        f"(−) 매수미결제 국내 T+2  {_fmt_krw(pending_buy_detail.get('domestic_krw', 0))}  ({pending_buy_detail.get('domestic_count', 0)}건)",
+        f"(−) 매수미결제 해외 T+1  {_fmt_krw(pending_buy_detail.get('overseas_krw', 0))}  ({pending_buy_detail.get('overseas_count', 0)}건)",
+        f"    미결제 순현금 (매도−매수)  {_fmt_krw(pending_net)}",
         f"(−) 미수매수 nrcvb_buy_amt  {_fmt_krw(liabilities.get('nrcvb_buy_amt_krw', 0))}",
         f"(−) 신용대출 tot_loan_amt    {_fmt_krw(liabilities.get('credit_loan_krw', 0))}",
         "",
@@ -199,7 +205,11 @@ def build_hts_comparison_section(client, snapshot: dict) -> str:
 
     for row in (pending_detail.get("domestic_trades") or [])[:5]:
         lines.append(
-            f"  · 국내 미결제 {row.get('ticker')} {row.get('amount_krw'):,}원 결제일 {row.get('settlement_date')}"
+            f"  · 국내 매도미결제 {row.get('ticker')} {row.get('amount_krw'):,}원 결제일 {row.get('settlement_date')}"
+        )
+    for row in (pending_buy_detail.get("domestic_trades") or [])[:5]:
+        lines.append(
+            f"  · 국내 매수미결제 {row.get('ticker')} {row.get('amount_krw'):,}원 결제일 {row.get('settlement_date')}"
         )
     for row in (pending_detail.get("overseas_trades") or [])[:5]:
         lines.append(

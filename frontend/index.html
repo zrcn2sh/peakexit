@@ -722,9 +722,13 @@ function getAssetBreakdown(s) {
     overseas_stocks_krw: pick(b.overseas_stocks_krw, s && s.overseas_stocks_krw),
     overseas_cash_usd: pick(b.overseas_cash_usd, s && s.overseas_cash_usd),
     overseas_cash_krw: pick(b.overseas_cash_krw, s && s.overseas_cash_krw, s && s.overseas_usd_cash_krw),
-    pending_sell_krw: pick(b.pending_sell_settlement_krw, b.pending_sell_krw, s && s.pending_sell_settlement_krw, s && s.pending_sell_proceeds_krw),
+    pending_sell_krw: pick(b.pending_settlement_net_krw, b.pending_sell_settlement_krw, b.pending_sell_krw, s && s.pending_settlement_net_krw, s && s.pending_sell_settlement_krw, s && s.pending_sell_proceeds_krw),
+    pending_sell_gross_krw: pick(b.pending_sell_settlement_gross_krw, s && s.pending_sell_settlement_gross_krw),
     pending_sell_dom_krw: pick(b.pending_sell_settlement_dom_krw, s && s.pending_sell_settlement_dom_krw),
     pending_sell_ov_krw: pick(b.pending_sell_settlement_ov_krw, s && s.pending_sell_settlement_ov_krw),
+    pending_buy_settle_krw: pick(b.pending_buy_settlement_krw, s && s.pending_buy_settlement_krw),
+    pending_buy_dom_krw: pick(b.pending_buy_settlement_dom_krw, s && s.pending_buy_settlement_dom_krw),
+    pending_buy_ov_krw: pick(b.pending_buy_settlement_ov_krw, s && s.pending_buy_settlement_ov_krw),
     nrcvb_buy_amt_krw: pick(b.nrcvb_buy_amt_krw, s && s.nrcvb_buy_amt_krw),
     credit_loan_krw: pick(b.credit_loan_krw, s && s.credit_loan_krw),
     deductions_krw: pick(b.deductions_krw, s && s.deductions_krw),
@@ -798,6 +802,11 @@ function renderAssetBreakdown(s) {
   let footHtml = '<tr class="row-subtotal"><td>소계 (국내주식+국내예수+해외주식원화+해외예수원화)</td><td>' + fmt(sub) + '원</td></tr>';
   footHtml += footRow('(+) 매도 미결제 · 국내 T+2', ab.pending_sell_dom_krw, '+');
   footHtml += footRow('(+) 매도 미결제 · 해외 T+1', ab.pending_sell_ov_krw, '+');
+  footHtml += footRow('(−) 매수 미결제 · 국내 T+2', ab.pending_buy_dom_krw, '-');
+  footHtml += footRow('(−) 매수 미결제 · 해외 T+1', ab.pending_buy_ov_krw, '-');
+  if (ab.pending_sell_krw !== 0 && (ab.pending_buy_settle_krw > 0 || ab.pending_sell_gross_krw > ab.pending_sell_krw)) {
+    footHtml += footRow('미결제 순현금 (매도−매수)', ab.pending_sell_krw, ab.pending_sell_krw >= 0 ? '+' : '-');
+  }
   footHtml += footRow('(−) 미수매수 nrcvb_buy_amt', ab.nrcvb_buy_amt_krw, '-');
   footHtml += footRow('(−) 신용대출 tot_loan_amt', ab.credit_loan_krw, '-');
   if (Number(s.hts_tot_evlu_krw) > 0 || Number(s.hts_nass_krw) > 0) {
@@ -845,12 +854,16 @@ function renderMetrics(s) {
   const ev = document.getElementById('m-eval');
   const elPending = document.getElementById('m-pending-adj');
   if (elPending) {
-    const pendingSell = Number(s.pending_sell_settlement_krw ?? s.pending_sell_proceeds_krw) || 0;
+    const pendingNet = Number(s.pending_settlement_net_krw ?? s.pending_sell_settlement_krw ?? s.pending_sell_proceeds_krw) || 0;
+    const pendingSellGross = Number(s.pending_sell_settlement_gross_krw) || 0;
+    const pendingBuy = Number(s.pending_buy_settlement_krw) || 0;
     const deduct = Number(s.deductions_krw) || 0;
-    if (pendingSell > 0 || deduct > 0) {
+    if (pendingNet !== 0 || pendingSellGross > 0 || pendingBuy > 0 || deduct > 0) {
       elPending.style.display = '';
       let note = '';
-      if (pendingSell > 0) note += '미결제 매도 +' + fmt(pendingSell) + '원';
+      if (pendingSellGross > 0) note += '미결제 매도 +' + fmt(pendingSellGross) + '원';
+      if (pendingBuy > 0) note += (note ? ' · ' : '') + '미결제 매수 −' + fmt(pendingBuy) + '원';
+      else if (pendingNet > 0) note += (note ? ' · ' : '') + '순미결제 +' + fmt(pendingNet) + '원';
       if (deduct > 0) note += (note ? ' · ' : '') + '차감 −' + fmt(deduct) + '원';
       elPending.textContent = note;
     } else {
@@ -863,7 +876,11 @@ function renderMetrics(s) {
   const sub = sumBreakdownSubtotal(ab);
   let evTitle = '국내주식 '+fmt(ab.domestic_stocks_krw)+' + 국내예수 '+fmt(ab.domestic_cash_krw);
   evTitle += ' + 해외주식(원) '+fmt(ab.overseas_stocks_krw)+' + 해외예수(원) '+fmt(ab.overseas_cash_krw);
-  if (ab.pending_sell_krw > 0) evTitle += ' + 미결제 '+fmt(ab.pending_sell_krw);
+  if (ab.pending_sell_krw > 0) evTitle += ' + 미결제순 ' + fmt(ab.pending_sell_krw);
+  else if (ab.pending_sell_gross_krw > 0) {
+    evTitle += ' + 미결제매도 ' + fmt(ab.pending_sell_gross_krw);
+    if (ab.pending_buy_settle_krw > 0) evTitle += ' − 미결제매수 ' + fmt(ab.pending_buy_settle_krw);
+  }
   if (ab.deductions_krw > 0) evTitle += ' − 차감 '+fmt(ab.deductions_krw);
   evTitle += ' = '+fmt(displayEval);
   const elBd = document.getElementById('m-asset-breakdown');
