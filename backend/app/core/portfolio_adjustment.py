@@ -565,7 +565,12 @@ def trade_settlement_date(trade: dict) -> Optional[date]:
 
 
 def is_pending_sell_settlement(trade: dict, now_kst: Optional[datetime] = None) -> bool:
-    """체결됐으나 결제일 전 매도(T+2/T+1 미결제)."""
+    """
+    체결됐으나 결제일 전(또는 결제일 당일·미국) 매도 미결제.
+    - 국내 T+2: 결제일 전일까지 (settle > today)
+    - 해외 T+1: 결제일 당일까지 포함 (settle >= today)
+      미국은 결제일 오전에도 외화예수 반영이 늦는 경우가 많음.
+    """
     if (trade.get("type") or "").upper() != "SELL":
         return False
     settle = trade_settlement_date(trade)
@@ -576,11 +581,16 @@ def is_pending_sell_settlement(trade: dict, now_kst: Optional[datetime] = None) 
         now = now.replace(tzinfo=SEOUL_TZ)
     region = trade.get("region", "KR")
     today = now.astimezone(NY_TZ).date() if region == "US" else now.astimezone(SEOUL_TZ).date()
+    if region == "US":
+        return settle >= today
     return settle > today
 
 
 def is_pending_buy_settlement(trade: dict, now_kst: Optional[datetime] = None) -> bool:
-    """체결됐으나 결제일 전 매수(T+2/T+1 미결제). 미결제 매도 대금으로 매수한 경우 총자산 이중 가산 방지."""
+    """
+    체결됐으나 결제일 전(또는 결제일 당일·미국) 매수 미결제.
+    미결제 매도 대금으로 매수한 경우 총자산 이중 가산 방지.
+    """
     if (trade.get("type") or "").upper() != "BUY":
         return False
     settle = trade_settlement_date(trade)
@@ -591,6 +601,8 @@ def is_pending_buy_settlement(trade: dict, now_kst: Optional[datetime] = None) -
         now = now.replace(tzinfo=SEOUL_TZ)
     region = trade.get("region", "KR")
     today = now.astimezone(NY_TZ).date() if region == "US" else now.astimezone(SEOUL_TZ).date()
+    if region == "US":
+        return settle >= today
     return settle > today
 
 
@@ -734,6 +746,318 @@ def calc_pending_buy_settlement_krw(
     return total, detail
 
 
+def estimate_today_domestic_buy_krw(
+    domestic_output2: Optional[dict],
+    holdings: Optional[list[dict]] = None,
+) -> tuple[float, dict]:
+    """
+    당일 국내 매수 금액 (원화).
+    체결 API에 누락된 당일 매수(예: 일부 종목)를 잔고 output2.thdt_buy_amt /
+    종목 thdt_buyqty 로 보완한다. 해외 매도미결제 재사용 시 이중 가산 방지용.
+    """
+    api_thdt = _kis_float_o2(domestic_output2, "thdt_buy_amt")
+    rows: list[dict] = []
+    from_holdings = 0.0
+    for h in holdings or []:
+        if h.get("currency") == "USD" or h.get("region") == "US":
+            continue
+        qty = int(h.get("thdt_buy_qty") or 0)
+        if qty <= 0:
+            continue
+        avg = float(h.get("avg_price") or 0)
+        pchs = float(h.get("purchase_amount") or 0)
+        # 당일 전량 매수면 매입금액, 일부면 수량×단가
+        held = int(h.get("quantity") or 0)
+        if held > 0 and qty >= held and pchs > 0:
+            amt = pchs
+        else:
+            amt = qty * avg if avg > 0 else 0.0
+        if amt <= 0:
+            continue
+        from_holdings += amt
+        rows.append({
+            "ticker": h.get("ticker"),
+            "name": h.get("name"),
+            "region": "KR",
+            "amount_krw": round(amt),
+            "quantity": qty,
+            "source": "holdings_thdt_buy",
+        })
+
+    total = max(api_thdt, from_holdings)
+    detail = {
+        "method": "today_domestic_buy_estimate",
+        "api_thdt_buy_amt": round(api_thdt),
+        "holdings_thdt_buy_krw": round(from_holdings),
+        "total_krw": round(total),
+        "holdings_trades": rows,
+    }
+    return round(total), detail
+
+
+def _domestic_tot_composition(
+    domestic_output2: Optional[dict],
+    stocks_krw: float,
+    cash_krw: float,
+) -> dict:
+    """
+    한투 tot_evlu_amt 구성 추정.
+    - stocks_plus_recv: tot ≈ scts + prvs/nxdy  (예수 dnca 미포함 — 당일매도 후 흔함)
+    - stocks_plus_cash: tot ≈ scts + dnca
+    - other
+    """
+    tot = _kis_float_o2(domestic_output2, "tot_evlu_amt")
+    nxdy = _kis_float_o2(domestic_output2, "nxdy_excc_amt")
+    prvs = _kis_float_o2(domestic_output2, "prvs_rcdl_excc_amt")
+    d2 = _kis_float_o2(domestic_output2, "d2_exa_amt")
+    field_recv = max(nxdy, prvs, d2)
+    thdt_sll = _kis_float_o2(domestic_output2, "thdt_sll_amt")
+    stocks = max(0.0, float(stocks_krw or 0))
+    cash = max(0.0, float(cash_krw or 0))
+    mode = "other"
+    if tot > 0:
+        if field_recv > 0 and abs(tot - (stocks + field_recv)) <= max(1000.0, tot * 0.01):
+            mode = "stocks_plus_recv"
+        elif abs(tot - (stocks + cash)) <= max(1000.0, tot * 0.01):
+            mode = "stocks_plus_cash"
+    return {
+        "tot_evlu_amt": tot,
+        "stocks_krw": stocks,
+        "cash_krw": cash,
+        "field_recv_krw": field_recv,
+        "thdt_sll_amt": thdt_sll,
+        "mode": mode,
+    }
+
+
+def estimate_domestic_settlement_payable_krw(
+    domestic_output2: Optional[dict],
+    domestic_stocks_krw: float,
+    domestic_cash_krw: float,
+) -> tuple[float, dict]:
+    """
+    미결제 매수(정산대금) 추정.
+    tot_evlu 가 (주식+예수)보다 작을 때만 — 단, tot 가 주식+정산예정만 담고
+    예수(dnca)를 빼는 구성이면 갭을 매수미결제로 쓰지 않는다.
+    """
+    api_scts = _kis_float_o2(domestic_output2, "scts_evlu_amt")
+    holdings_stocks = max(0.0, float(domestic_stocks_krw or 0))
+    stocks = api_scts if api_scts > 0 else holdings_stocks
+    cash = max(0.0, float(domestic_cash_krw or 0))
+    comp = _domestic_tot_composition(domestic_output2, stocks, cash)
+    tot = comp["tot_evlu_amt"]
+    parts = stocks + cash
+    gap = 0.0
+    note = ""
+    if comp["mode"] == "stocks_plus_recv":
+        # tot = 주식+매도정산예정, dnca 별도 → (주식+dnca)-tot = dnca-정산 으로 허위 매수미결제
+        note = "skip_tot_excludes_dnca"
+    elif tot > 0 and parts > tot + 1000:
+        gap = parts - tot
+        note = "tot_evlu_gap"
+    detail = {
+        "method": "tot_evlu_gap",
+        "note": note,
+        "tot_mode": comp["mode"],
+        "tot_evlu_amt": round(tot),
+        "api_scts_evlu_amt": round(api_scts),
+        "holdings_stocks_krw": round(holdings_stocks),
+        "stocks_used_krw": round(stocks),
+        "stocks_plus_cash_krw": round(parts),
+        "field_recv_krw": round(comp["field_recv_krw"]),
+        "payable_krw": round(gap),
+    }
+    return round(gap), detail
+
+
+def estimate_domestic_settlement_receivable_krw(
+    domestic_output2: Optional[dict],
+    domestic_stocks_krw: float,
+    domestic_cash_krw: float,
+) -> tuple[float, dict]:
+    """
+    국내 매도대금이 dnca(예수금)에 아직 안 들어온 정산예정액.
+
+    - tot ≈ 주식+정산예정(prvs/nxdy) 이면: 그 정산예정액을 매도미결제로 사용
+      (당일 금현물 매도 등 — tot 에 이미 잡히지만 dnca 미반영)
+    - tot ≈ 주식+예수 이면: tot−(주식+예수) 갭만 (정산 필드 단독 사용 금지)
+    - tot 없으면: thdt_sll / prvs / nxdy 폴백
+    """
+    api_scts = _kis_float_o2(domestic_output2, "scts_evlu_amt")
+    holdings_stocks = max(0.0, float(domestic_stocks_krw or 0))
+    stocks = api_scts if api_scts > 0 else holdings_stocks
+    cash = max(0.0, float(domestic_cash_krw or 0))
+    comp = _domestic_tot_composition(domestic_output2, stocks, cash)
+    tot = comp["tot_evlu_amt"]
+    field_recv = comp["field_recv_krw"]
+    thdt_sll = comp["thdt_sll_amt"]
+    parts = stocks + cash
+    tot_gap = 0.0
+    if tot > 0 and tot > parts + 1000:
+        tot_gap = tot - parts
+
+    if comp["mode"] == "stocks_plus_recv" and field_recv > 0:
+        receivable = field_recv
+        source = "tot_eq_scts_plus_recv"
+    elif tot > 0 and comp["mode"] == "stocks_plus_cash":
+        receivable = tot_gap
+        source = "tot_evlu_gap"
+    elif tot > 0:
+        # 구성 불명: 갭 우선, 없으면 당일매도액
+        receivable = tot_gap if tot_gap > 0 else 0.0
+        source = "tot_evlu_gap" if tot_gap > 0 else "none"
+    else:
+        receivable = max(field_recv, thdt_sll)
+        source = "nxdy_or_prvs_or_thdt_sll"
+
+    detail = {
+        "method": "domestic_settlement_receivable",
+        "source": source,
+        "tot_mode": comp["mode"],
+        "nxdy_excc_amt": round(_kis_float_o2(domestic_output2, "nxdy_excc_amt")),
+        "prvs_rcdl_excc_amt": round(_kis_float_o2(domestic_output2, "prvs_rcdl_excc_amt")),
+        "d2_exa_amt": round(_kis_float_o2(domestic_output2, "d2_exa_amt")),
+        "thdt_sll_amt": round(thdt_sll),
+        "field_recv_krw": round(field_recv),
+        "tot_evlu_amt": round(tot),
+        "api_scts_evlu_amt": round(api_scts),
+        "holdings_stocks_krw": round(holdings_stocks),
+        "stocks_used_krw": round(stocks),
+        "stocks_plus_cash_krw": round(parts),
+        "tot_evlu_gap_krw": round(tot_gap),
+        "receivable_krw": round(receivable),
+    }
+    return round(receivable), detail
+
+
+def merge_pending_sell_with_domestic_receivable(
+    sell_settle_total: float,
+    sell_settle_detail: dict,
+    *,
+    settlement_receivable_krw: float = 0.0,
+    settlement_receivable_detail: Optional[dict] = None,
+    overseas_ustl_sll_krw: float = 0.0,
+    overseas_ustl_sll_source: str = "",
+) -> tuple[float, dict]:
+    """
+    체결 기반 매도 미결제와 잔고 정산예정(dnca/외화예수 미반영)을 병합.
+    국내는 max(체결미결제, nxdy/prvs_rcdl/tot_evlu갭),
+    해외는 max(체결미결제, CTRP6504R ustl_sll_amt_smtl).
+    """
+    detail = dict(sell_settle_detail or {})
+    dom_from_trades = float(detail.get("domestic_krw") or 0)
+    ov_from_trades = float(detail.get("overseas_krw") or 0)
+    recv = max(0.0, float(settlement_receivable_krw or 0))
+    ov_ustl = max(0.0, float(overseas_ustl_sll_krw or 0))
+    dom = max(dom_from_trades, recv)
+    ov = max(ov_from_trades, ov_ustl)
+    total = round(dom + ov)
+    detail["domestic_krw"] = round(dom)
+    detail["overseas_krw"] = round(ov)
+    detail["total_krw"] = total
+    detail["domestic_from_trades_krw"] = round(dom_from_trades)
+    detail["overseas_from_trades_krw"] = round(ov_from_trades)
+    detail["settlement_receivable_krw"] = round(recv)
+    detail["settlement_receivable_detail"] = settlement_receivable_detail or {}
+    detail["overseas_ustl_sll_krw"] = round(ov_ustl)
+    detail["overseas_ustl_sll_source"] = overseas_ustl_sll_source or ""
+    if recv > dom_from_trades + 1:
+        logger.info(
+            "국내 매도정산예정 보완 %s원 (체결미결제 %s → 잔고정산 %s)",
+            f"{dom:,.0f}",
+            f"{dom_from_trades:,.0f}",
+            f"{recv:,.0f}",
+        )
+    if ov_ustl > ov_from_trades + 1:
+        logger.info(
+            "해외 미결제매도(ustl_sll) 보완 %s원 (체결 %s → 잔고ustl %s, %s)",
+            f"{ov:,.0f}",
+            f"{ov_from_trades:,.0f}",
+            f"{ov_ustl:,.0f}",
+            overseas_ustl_sll_source or "ustl_sll",
+        )
+    return total, detail
+
+
+def merge_pending_buy_with_today_domestic(
+    buy_settle_total: float,
+    buy_settle_detail: dict,
+    today_dom_buy_krw: float,
+    today_dom_detail: Optional[dict] = None,
+    *,
+    settlement_payable_krw: float = 0.0,
+    settlement_payable_detail: Optional[dict] = None,
+    overseas_ustl_buy_krw: float = 0.0,
+    overseas_ustl_source: str = "",
+) -> tuple[float, dict]:
+    """
+    체결 기반 미결제 매수와 잔고 보완값을 병합.
+    국내는 max(체결미결제, thdt, tot_evlu갭),
+    해외는 max(체결미결제, CTRP6504R ustl_buy_amt_smtl).
+    """
+    detail = dict(buy_settle_detail or {})
+    dom_from_trades = float(detail.get("domestic_krw") or 0)
+    ov_from_trades = float(detail.get("overseas_krw") or 0)
+    today_dom = max(0.0, float(today_dom_buy_krw or 0))
+    payable = max(0.0, float(settlement_payable_krw or 0))
+    ov_ustl = max(0.0, float(overseas_ustl_buy_krw or 0))
+    dom = max(dom_from_trades, today_dom, payable)
+    ov = max(ov_from_trades, ov_ustl)
+    total = round(dom + ov)
+    detail["domestic_krw"] = round(dom)
+    detail["overseas_krw"] = round(ov)
+    detail["total_krw"] = total
+    detail["today_domestic_buy_krw"] = round(today_dom)
+    detail["today_domestic_buy_detail"] = today_dom_detail or {}
+    detail["settlement_payable_krw"] = round(payable)
+    detail["settlement_payable_detail"] = settlement_payable_detail or {}
+    detail["overseas_ustl_buy_krw"] = round(ov_ustl)
+    detail["overseas_ustl_source"] = overseas_ustl_source or ""
+    detail["overseas_from_trades_krw"] = round(ov_from_trades)
+    if today_dom > dom_from_trades + 1:
+        # 체결에 없던 당일매수를 잔고 기준으로 보강했다는 표시
+        extra = (today_dom_detail or {}).get("holdings_trades") or []
+        known = {
+            ((r.get("ticker") or "").upper(), round(float(r.get("amount_krw") or 0)))
+            for r in (detail.get("domestic_trades") or [])
+        }
+        merged_rows = list(detail.get("domestic_trades") or [])
+        for r in extra:
+            key = ((r.get("ticker") or "").upper(), round(float(r.get("amount_krw") or 0)))
+            if key in known:
+                continue
+            # 금액이 달라도 동일 티커면 체결 쪽이 작을 때 잔고 행 추가
+            tick = (r.get("ticker") or "").upper()
+            if any((x.get("ticker") or "").upper() == tick for x in merged_rows):
+                continue
+            merged_rows.append({**r, "settlement_date": "", "trade_date": ""})
+        detail["domestic_trades"] = merged_rows
+        detail["domestic_count"] = len(merged_rows)
+        logger.info(
+            "당일 국내매수 보완 %s원 (체결미결제 %s → 잔고thdt %s)",
+            f"{dom:,.0f}",
+            f"{dom_from_trades:,.0f}",
+            f"{today_dom:,.0f}",
+        )
+    if payable > max(dom_from_trades, today_dom) + 1:
+        logger.info(
+            "국내 정산차감(tot_evlu갭) 보완 %s원 (체결 %s / thdt %s → %s)",
+            f"{payable:,.0f}",
+            f"{dom_from_trades:,.0f}",
+            f"{today_dom:,.0f}",
+            f"{dom:,.0f}",
+        )
+    if ov_ustl > ov_from_trades + 1:
+        logger.info(
+            "해외 미결제매수(ustl) 보완 %s원 (체결 %s → 잔고ustl %s, %s)",
+            f"{ov:,.0f}",
+            f"{ov_from_trades:,.0f}",
+            f"{ov_ustl:,.0f}",
+            overseas_ustl_source or "ustl",
+        )
+    return total, detail
+
+
 def parse_domestic_liabilities_krw(domestic_output2: Optional[dict]) -> dict:
     """국내 output2 부채·미수 항목 (원화)."""
     o = domestic_output2 if isinstance(domestic_output2, dict) else {}
@@ -749,23 +1073,45 @@ def parse_domestic_liabilities_krw(domestic_output2: Optional[dict]) -> dict:
 
 
 def merge_trade_sources(*sources: list[dict]) -> list[dict]:
-    """ticker·거래일·금액 기준 중복 제거 후 병합."""
-    seen: set[tuple] = set()
-    merged: list[dict] = []
+    """
+    체결 소스 병합 (중복 제거).
+    sell_log 와 API 는 체결금액이 1센트 단위로 어긋나는 경우가 있어
+    ticker·유형·거래일·수량 기준으로 묶고, API 체결을 sell_log 보다 우선한다.
+    """
+    source_rank = {
+        "api_overseas": 3,
+        "api_domestic": 3,
+        "api": 2,
+        "sell_log": 1,
+    }
+    by_key: dict[tuple, dict] = {}
+    order: list[tuple] = []
+
     for trades in sources:
-        for tr in trades:
+        for tr in trades or []:
             t_date = trade_calendar_date(tr) or ""
+            qty = int(tr.get("quantity") or 0)
+            amt = round(float(tr.get("amount") or 0), 2)
+            # 수량이 있으면 수량으로, 없으면 금액(달러/원) 반올림으로 묶음
+            amt_bucket = round(amt) if qty <= 0 else qty
             key = (
                 (tr.get("ticker") or "").upper(),
-                tr.get("type"),
+                (tr.get("type") or "").upper(),
                 t_date,
-                round(float(tr.get("amount") or 0), 2),
+                int(amt_bucket),
+                tr.get("region") or "",
             )
-            if key in seen:
+            if key not in by_key:
+                by_key[key] = tr
+                order.append(key)
                 continue
-            seen.add(key)
-            merged.append(tr)
-    return merged
+            old = by_key[key]
+            old_r = source_rank.get(str(old.get("source") or ""), 0)
+            new_r = source_rank.get(str(tr.get("source") or ""), 0)
+            if new_r > old_r:
+                by_key[key] = tr
+
+    return [by_key[k] for k in order]
 
 
 def calc_pending_sell_proceeds_krw(

@@ -4,7 +4,9 @@
 매도 조건 3가지:
 1. 손절 (Stop Loss)      : 수익률이 설정값 이하 → 즉시 매도
 2. 목표가 (Take Profit)  : 수익률이 목표값 이상 → 즉시 매도 (선택)
-3. 트레일링 스탑         : 고점 대비 N% 하락 → 매도 ("어깨에서 팔기")
+3. 트레일링 스탑
+   └ 발동%(trigger) 이상 상승 후: 고점 대비 trailing_drop% 하락 시 매도
+   └ 발동 전: 매입가 대비 trailing_drop% 하락 시 매도
    └ 종목별 AI 분석으로 트레일링 % 자동 결정
 """
 import json
@@ -52,6 +54,11 @@ class PeakTracker:
         _peak_file().write_text(json.dumps(self.data, ensure_ascii=False, indent=2))
 
     def update(self, ticker: str, current_price: float, avg_price: float) -> dict:
+        """
+        고점 추적.
+        - 초기/하한 고점 = 매입평균(avg_price). 매수 직후 하락도 '고점=매입가' 기준.
+        - 이후 현재가가 더 높으면 고점 갱신.
+        """
         if avg_price <= 0 or current_price < 0:
             return {
                 "peak_price": current_price,
@@ -61,27 +68,36 @@ class PeakTracker:
             }
 
         profit_rate = (current_price - avg_price) / avg_price * 100
+        # 매입가를 최소 고점으로 — 관측 시작이 이미 손실이어도 매입 시점을 고점으로 본다.
+        floor_peak = float(avg_price)
 
         if ticker not in self.data:
+            peak = max(current_price, floor_peak)
             self.data[ticker] = {
-                "peak_price": current_price,
-                "peak_profit_rate": profit_rate,
+                "peak_price": peak,
+                "peak_profit_rate": (peak - avg_price) / avg_price * 100,
                 "peak_at": datetime.now().isoformat(),
                 "avg_price": avg_price,
             }
         else:
-            if current_price > self.data[ticker]["peak_price"]:
-                self.data[ticker]["peak_price"] = current_price
-                self.data[ticker]["peak_profit_rate"] = profit_rate
-                self.data[ticker]["peak_at"] = datetime.now().isoformat()
+            entry = self.data[ticker]
+            prev_peak = float(entry.get("peak_price") or 0)
+            # 과거 데이터가 매입가보다 낮게 잡혀 있으면 매입가로 보정
+            peak = max(prev_peak, floor_peak, current_price)
+            if peak > prev_peak + 1e-12:
+                entry["peak_price"] = peak
+                entry["peak_profit_rate"] = (peak - avg_price) / avg_price * 100
+                entry["peak_at"] = datetime.now().isoformat()
+            entry["avg_price"] = avg_price
 
         self._save()
         entry = self.data[ticker]
-        drop_from_peak = (current_price - entry["peak_price"]) / entry["peak_price"] * 100
+        peak_price = float(entry["peak_price"])
+        drop_from_peak = (current_price - peak_price) / peak_price * 100 if peak_price > 0 else 0.0
         return {
-            "peak_price": entry["peak_price"],
-            "peak_profit_rate": entry["peak_profit_rate"],
-            "peak_at": entry["peak_at"],
+            "peak_price": peak_price,
+            "peak_profit_rate": float(entry.get("peak_profit_rate") or 0),
+            "peak_at": entry.get("peak_at"),
             "drop_from_peak_pct": drop_from_peak,
         }
 
@@ -183,6 +199,55 @@ def enrich_sell_execution_details(payload: dict) -> dict:
     return out
 
 
+def _fetch_live_price_for_log_entry(client, entry: dict) -> Optional[float]:
+    ticker = (entry.get("ticker") or "").strip()
+    if not ticker:
+        return None
+    try:
+        if entry.get("ovrs_excg_cd") or (entry.get("currency") or "") == "USD":
+            qcd = entry.get("ovrs_quote_excd")
+            if not qcd:
+                _, qcd = client.detect_us_exchange(ticker)
+            px = client.get_overseas_current_price(ticker, qcd)
+        else:
+            px = client.get_current_price(ticker)
+        return float(px) if px and float(px) > 0 else None
+    except Exception as e:
+        logger.debug("매도이력 현재가 조회 실패 %s: %s", ticker, e)
+        return None
+
+
+def enrich_sell_log_with_live_prices(entries: list[dict]) -> list[dict]:
+    """
+    매도 이력에 현재가·매도가 대비 등락% 를 붙인다.
+    동일 티커는 1회만 시세 조회.
+    """
+    if not entries:
+        return []
+    client = get_kis_client()
+    price_cache: dict[str, Optional[float]] = {}
+    out: list[dict] = []
+    for raw in entries:
+        entry = enrich_sell_execution_details(raw)
+        ticker = (entry.get("ticker") or "").strip().upper()
+        key = f"{ticker}:{(entry.get('ovrs_excg_cd') or entry.get('currency') or 'KRW')}"
+        if key not in price_cache:
+            price_cache[key] = _fetch_live_price_for_log_entry(client, entry) if ticker else None
+        live = price_cache[key]
+        sell = entry.get("sell_price")
+        try:
+            sell_f = float(sell) if sell is not None else 0.0
+        except (TypeError, ValueError):
+            sell_f = 0.0
+        vs_pct = None
+        if live is not None and sell_f > 0:
+            vs_pct = round((live - sell_f) / sell_f * 100, 2)
+        entry["live_price"] = live
+        entry["vs_sell_pct"] = vs_pct
+        out.append(entry)
+    return out
+
+
 # ─────────────────────────────────────────────────
 # 매도 판단 엔진
 # ─────────────────────────────────────────────────
@@ -256,20 +321,29 @@ def evaluate_sell(
             **_trading_meta_from_holding(holding),
         }
 
-    # ── 3. 트레일링 스탑 ("어깨에서 팔기") ──────
+    # ── 3. 트레일링 스탑 ──────────────────────────
+    # - 고점 수익률 ≥ 발동%(trigger): 고점 대비 trailing_drop% 하락 시 ("어깨")
+    # - 아직 발동 전(고점이 매입가 근처): 매입가 대비 trailing_drop% 하락 시
+    #   (고점이 매입가보다 아주 조금만 높아도 발동 미달이면 매입가 기준으로 보호)
     peak_info = peak_tracker.update(ticker, current_price, avg_price)
     drop_from_peak = peak_info["drop_from_peak_pct"]
     peak_profit = peak_info["peak_profit_rate"]
 
-    if peak_profit >= trailing_trigger and drop_from_peak <= -trailing_drop:
+    if peak_profit >= trailing_trigger:
+        trailing_hit = drop_from_peak <= -trailing_drop
+        trail_basis = f"고점 {peak_profit:.1f}%에서 {drop_from_peak:.1f}% 하락"
+    else:
+        trailing_hit = profit_rate <= -trailing_drop
+        trail_basis = f"매입가 대비 {profit_rate:.1f}% (발동 전 보호)"
+
+    if trailing_hit:
         return {
             "ticker": ticker,
             "name": name,
             "quantity": qty,
             "reason": "TRAILING_STOP",
             "reason_label": (
-                f"트레일링 스탑 (고점 {peak_profit:.1f}%에서 "
-                f"{drop_from_peak:.1f}% 하락 / 기준: {trailing_source})"
+                f"트레일링 스탑 ({trail_basis} / 기준: {trailing_source})"
             ),
             "profit_rate": profit_rate,
             "avg_price": avg_price,
@@ -351,6 +425,11 @@ def calc_portfolio_summary(
         calc_pending_buy_eval_krw,
         calc_pending_buy_settlement_krw,
         calc_pending_sell_settlement_krw,
+        estimate_domestic_settlement_payable_krw,
+        estimate_domestic_settlement_receivable_krw,
+        estimate_today_domestic_buy_krw,
+        merge_pending_buy_with_today_domestic,
+        merge_pending_sell_with_domestic_receivable,
         merge_trade_sources,
         parse_domestic_liabilities_krw,
         pending_settlement_mode,
@@ -399,6 +478,48 @@ def calc_portfolio_summary(
 
     pending_sell_gross_krw, settle_detail = calc_pending_sell_settlement_krw(trades, fx_rate)
     pending_buy_settle_krw, buy_settle_detail = calc_pending_buy_settlement_krw(trades, fx_rate)
+    today_dom_buy_krw, today_dom_detail = estimate_today_domestic_buy_krw(o, holdings)
+    from app.core.account_valuation import holdings_domestic_stocks_krw as _dom_stocks_sum
+
+    dom_stocks_hint = _dom_stocks_sum(holdings or [])
+    if dom_stocks_hint <= 0:
+        dom_stocks_hint = scts_evlu_amt
+    receivable_krw, receivable_detail = estimate_domestic_settlement_receivable_krw(
+        o, dom_stocks_hint, cash_deposit_krw
+    )
+    ov_ustl_sll_krw = float(getattr(ov_v, "ustl_sll_amt_krw", 0) or 0)
+    ov_ustl_sll_src = ""
+    if isinstance(getattr(ov_v, "detail", None), dict):
+        ov_ustl_sll_src = str(ov_v.detail.get("ustl_sll_source") or "")
+        if ov_ustl_sll_krw <= 0:
+            ov_ustl_sll_krw = float(ov_v.detail.get("ustl_sll_amt_krw") or 0)
+    pending_sell_gross_krw, settle_detail = merge_pending_sell_with_domestic_receivable(
+        pending_sell_gross_krw,
+        settle_detail,
+        settlement_receivable_krw=receivable_krw,
+        settlement_receivable_detail=receivable_detail,
+        overseas_ustl_sll_krw=ov_ustl_sll_krw,
+        overseas_ustl_sll_source=ov_ustl_sll_src,
+    )
+    payable_krw, payable_detail = estimate_domestic_settlement_payable_krw(
+        o, dom_stocks_hint, cash_deposit_krw
+    )
+    ov_ustl_krw = float(getattr(ov_v, "ustl_buy_amt_krw", 0) or 0)
+    ov_ustl_src = ""
+    if isinstance(getattr(ov_v, "detail", None), dict):
+        ov_ustl_src = str(ov_v.detail.get("ustl_buy_source") or "")
+        if ov_ustl_krw <= 0:
+            ov_ustl_krw = float(ov_v.detail.get("ustl_buy_amt_krw") or 0)
+    pending_buy_settle_krw, buy_settle_detail = merge_pending_buy_with_today_domestic(
+        pending_buy_settle_krw,
+        buy_settle_detail,
+        today_dom_buy_krw,
+        today_dom_detail,
+        settlement_payable_krw=payable_krw,
+        settlement_payable_detail=payable_detail,
+        overseas_ustl_buy_krw=ov_ustl_krw,
+        overseas_ustl_source=ov_ustl_src,
+    )
     pending_buy_eval_krw, pending_buy_eval_details = calc_pending_buy_eval_krw(holdings, trades)
     liabilities = parse_domestic_liabilities_krw(o)
 
@@ -440,6 +561,7 @@ def calc_portfolio_summary(
         pending_buy_krw=pending_buy_eval_krw,
         nrcvb_buy_amt_krw=float(liabilities.get("nrcvb_buy_amt_krw") or 0),
         credit_loan_krw=float(liabilities.get("credit_loan_krw") or 0),
+        domestic_output2=o,
     )
     account_base_krw = float(breakdown["subtotal_krw"])
     total_net_worth_krw = float(breakdown["total_net_worth_krw"])

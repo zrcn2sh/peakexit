@@ -5,6 +5,7 @@
 - 월요일 08:50 : AI 트레일링 비율 갱신 → 텔레그램 알림
 """
 import logging
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -79,11 +80,22 @@ def run_sell_check():
     client = get_kis_client()
     notifier = get_notifier()
 
-    try:
-        holdings = client.get_holdings()
-    except Exception as e:
-        logger.error(f"잔고조회 실패: {e}")
-        notifier.notify_system(f"잔고 조회 실패\n{e}", level="error")
+    holdings = None
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            holdings = client.get_holdings()
+            break
+        except Exception as e:
+            last_err = e
+            wait = 2.0 * (attempt + 1)
+            logger.warning("잔고조회 실패 재시도 %s/3 (%.0fs): %s", attempt + 1, wait, e)
+            if attempt < 2:
+                time.sleep(wait)
+
+    if holdings is None:
+        # 한투 일시 500 등은 흔함 — 텔레그램 알림 없이 로그만. 다음 5분 주기에 재시도.
+        logger.error("잔고조회 실패 (매도조건 검사 스킵): %s", last_err)
         return
 
     cache = _load_cache()

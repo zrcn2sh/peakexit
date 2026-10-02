@@ -1,8 +1,11 @@
 """
 한투 Open API 문서 기준 계좌 총자산(원화) 산출.
 
-- 국내 TTTC8434R output2.tot_evlu_amt: 유가증권 평가 + D+2 예수금 (해외 미포함)
+- 국내 TTTC8434R output2.tot_evlu_amt:
+  평소에는 유가증권+예수 성격. 당일 매도 직후엔 주식+정산예정만 담고
+  dnca(예수)를 빼는 경우가 있어 그때는 dnca를 별도 가산한다.
 - 해외 CTRP6504R(체결기준현재잔고): output3 합계 또는 output1 평가 + output2 외화예수금(원화환산)
+  + ustl_sll(미결제매도) / ustl_buy(미결제매수)
 - 해외 TTTS3012R 폴백: OVRS_EXCG_CD=NASD 1회 (미국 전체, 거래소 3회 합산 금지)
 """
 from __future__ import annotations
@@ -84,6 +87,10 @@ class OverseasValuation:
     usd_cash_krw: float = 0.0
     usd_cash_usd: float = 0.0
     fx_rate: float = 0.0
+    # CTRP6504R output3 — 외화예수에 아직 안 빠진 미결제 매수(원화)
+    ustl_buy_amt_krw: float = 0.0
+    # CTRP6504R output3 — 외화예수에 아직 안 들어온 미결제 매도(원화)
+    ustl_sll_amt_krw: float = 0.0
     source: str = ""
     row_count: int = 0
     detail: dict = field(default_factory=dict)
@@ -264,6 +271,44 @@ def _pick_overseas_total(
     return 0.0, ""
 
 
+def _ustl_sll_krw_from_present(data: dict) -> tuple[float, str]:
+    """해외 미결제 매도(원화). output3.ustl_sll_amt_smtl."""
+    o3 = _first_dict(data.get("output3"))
+    ustl = kis_float(o3, "ustl_sll_amt_smtl", "ustl_sll_amt")
+    if ustl > 0:
+        return ustl, "output3_ustl_sll_amt_smtl"
+    return 0.0, ""
+
+
+def _ustl_buy_krw_from_present(data: dict, fx_rate: float) -> tuple[float, str]:
+    """
+    해외 미결제 매수(원화).
+    output3.ustl_buy_amt_smtl 우선 — 체결 API에 빠진 종목(예: WMB)도 포함.
+    없으면 output2.frcr_buy_amt_smtl × 환율.
+    """
+    o3 = _first_dict(data.get("output3"))
+    ustl = kis_float(o3, "ustl_buy_amt_smtl", "ustl_buy_amt")
+    if ustl > 0:
+        return ustl, "output3_ustl_buy_amt_smtl"
+
+    buy_usd = 0.0
+    rate = max(0.0, float(fx_rate or 0))
+    rows = data.get("output2")
+    rows = rows if isinstance(rows, list) else ([rows] if isinstance(rows, dict) else [])
+    for dep in rows:
+        if not isinstance(dep, dict):
+            continue
+        ccy = (dep.get("crcy_cd") or dep.get("tr_crcy_cd") or "").strip().upper()
+        if ccy and ccy not in ("USD", "840", ""):
+            continue
+        buy_usd += kis_float(dep, "frcr_buy_amt_smtl", "frcr_buy_amt")
+        if rate <= 0:
+            rate = kis_float(dep, "frst_bltn_exrt", "bass_exrt", "exrt")
+    if buy_usd > 0 and rate > 0:
+        return buy_usd * rate, "output2_frcr_buy_amt_smtl_x_rate"
+    return 0.0, ""
+
+
 def overseas_from_present_balance(data: dict) -> OverseasValuation:
     """CTRP6504R / VCTRP6504R 응답 → 해외 총자산(원화)."""
     if not isinstance(data, dict):
@@ -297,6 +342,8 @@ def overseas_from_present_balance(data: dict) -> OverseasValuation:
         elif qty <= 0:
             continue
 
+    ustl_buy_krw, ustl_src = _ustl_buy_krw_from_present(data, fx_rate)
+    ustl_sll_krw, ustl_sll_src = _ustl_sll_krw_from_present(data)
     total, source = _pick_overseas_total(stocks_krw, cash_krw, o3_total, o3_key)
     if total <= 0:
         return OverseasValuation.empty()
@@ -308,6 +355,8 @@ def overseas_from_present_balance(data: dict) -> OverseasValuation:
         usd_cash_krw=cash_krw,
         usd_cash_usd=cash_usd,
         fx_rate=fx_rate,
+        ustl_buy_amt_krw=ustl_buy_krw,
+        ustl_sll_amt_krw=ustl_sll_krw,
         source=source,
         row_count=row_count,
         detail={
@@ -318,6 +367,12 @@ def overseas_from_present_balance(data: dict) -> OverseasValuation:
             "usd_cash_krw": cash_krw,
             "usd_cash_usd": cash_usd,
             "computed_sum": stocks_krw + cash_krw,
+            "ustl_buy_amt_krw": ustl_buy_krw,
+            "ustl_buy_source": ustl_src,
+            "ustl_sll_amt_krw": ustl_sll_krw,
+            "ustl_sll_source": ustl_sll_src,
+            "tot_asst_amt": kis_float(_first_dict(data.get("output3")), "tot_asst_amt"),
+            "tot_dncl_amt": kis_float(_first_dict(data.get("output3")), "tot_dncl_amt"),
         },
     )
 
@@ -547,14 +602,19 @@ def build_asset_breakdown(
     pending_buy_settlement_ov_krw: float = 0.0,
     nrcvb_buy_amt_krw: float = 0.0,
     credit_loan_krw: float = 0.0,
+    domestic_output2: Optional[dict] = None,
 ) -> dict:
     """
     추정 총자산 =
-      국내주식 + 국내예수금 + 해외주식(원, API evlu_amt) + 해외예수금(원)
-      + 미결제 순현금(매도 T+2/T+1 − 매수 T+2/T+1)
-      + 잔고 미반영 당일매수(pending_buy_krw)
-      − 미수매수(nrcvb) − 신용대출(tot_loan)
+      국내주식 + 국내예수금 + 해외주식(원) + 해외예수금(원)
+      + 매도미결제(국내 T+2 / 해외 T+1) − 매수미결제 − 차감
+
+    당일 국내 매도 직후 tot_evlu ≈ 주식평가+국내매도정산예정(prvs)이면
+    tot에 국내 매도미결제가 이미 포함되므로, 총자산 합산 시
+    국내 예수(dnca)와 국내 매도미결제를 따로 더하지 않는다.
+    (해외 주식·예수·해외 매도미결제는 그대로 가산)
     """
+    from app.core.portfolio_adjustment import _domestic_tot_composition
     fx = float(fx_rate or overseas.fx_rate or 0)
 
     dom_cash = max(0.0, domestic.dnca_tot_amt)
@@ -600,7 +660,31 @@ def build_asset_breakdown(
     deductions = nrcvb + credit_loan
 
     subtotal = dom_stocks + dom_cash + ov_stocks_krw + ov_cash_krw
-    total = subtotal + pending_settle_net + pending_buy_eval + legacy_pending - deductions
+    comp = _domestic_tot_composition(
+        domestic_output2,
+        dom_stocks,
+        dom_cash,
+    ) if domestic_output2 else {"mode": "other", "tot_evlu_amt": domestic.tot_evlu_amt}
+    tot_mode = str(comp.get("mode") or "other")
+    tot_evlu = max(0.0, float(comp.get("tot_evlu_amt") or domestic.tot_evlu_amt or 0))
+
+    if tot_mode == "stocks_plus_recv" and tot_evlu > 0:
+        # tot = 국내주식 + 국내 매도미결제(정산예정). dnca·국내 미결제 중복 가산 방지.
+        pending_for_total = pending_sell_ov - pending_buy_settle
+        total = (
+            tot_evlu
+            + ov_stocks_krw
+            + ov_cash_krw
+            + pending_for_total
+            + pending_buy_eval
+            + legacy_pending
+            - deductions
+        )
+        pending_settle_net = pending_for_total
+        total_method = "tot_evlu_plus_overseas_plus_ov_pending"
+    else:
+        total = subtotal + pending_settle_net + pending_buy_eval + legacy_pending - deductions
+        total_method = "stocks_cash_plus_pending"
 
     return {
         "domestic_stocks_krw": round(dom_stocks),
@@ -610,6 +694,9 @@ def build_asset_breakdown(
         "overseas_cash_usd": round(ov_cash_usd, 2),
         "overseas_cash_krw": round(ov_cash_krw),
         "subtotal_krw": round(subtotal),
+        "domestic_tot_mode": tot_mode,
+        "domestic_tot_evlu_krw": round(tot_evlu),
+        "total_method": total_method,
         "pending_sell_settlement_gross_krw": round(pending_sell_gross),
         "pending_sell_settlement_dom_krw": round(pending_sell_dom),
         "pending_sell_settlement_ov_krw": round(pending_sell_ov),

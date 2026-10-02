@@ -47,6 +47,7 @@
   .btn:hover{background:rgba(255,255,255,0.06)}
   .btn.primary{background:var(--accent);color:#000;border-color:transparent;font-weight:600}
   .btn.primary:hover{opacity:.85}
+  .btn.log-filter-btn.primary{background:var(--accent);color:#000;border-color:transparent;font-weight:600}
   .btn.danger{border-color:rgba(255,75,110,0.4);color:var(--danger)}
   .btn.danger:hover{background:rgba(255,75,110,0.08)}
   .content{padding:24px 28px;flex:1;overflow-y:auto}
@@ -95,6 +96,9 @@
   .holdings-table th,.atr-table th{text-align:left;font-size:var(--fs-2xs);color:var(--text2);padding:0 12px 11px;font-weight:500;letter-spacing:.6px;text-transform:uppercase;border-bottom:1px solid var(--border)}
   .holdings-table td,.atr-table td{padding:14px 12px;border-bottom:1px solid var(--border);font-size:var(--fs-sm);vertical-align:middle}
   .holdings-table tr:hover td,.atr-table tr:hover td{background:rgba(255,255,255,0.02)}
+  .holdings-table tfoot td{border-bottom:none;border-top:1px solid var(--border2);padding-top:16px;font-weight:700;background:rgba(255,255,255,0.02)}
+  .holdings-table tfoot .holdings-sum-label{color:var(--text2);font-weight:600;font-size:var(--fs-xs);letter-spacing:.4px}
+  .holdings-table tfoot .holdings-sum-val{color:var(--accent);font-size:var(--fs-sm)}
   .holding-eval-sub{font-size:var(--fs-2xs);color:var(--text2);font-weight:500;margin-top:5px;line-height:1.45}
   .holding-eval-sub .holding-eval-krw{color:var(--text);font-weight:600}
   .holding-pnl-amt{font-size:var(--fs-2xs);font-weight:600;margin-top:5px;line-height:1.45}
@@ -144,6 +148,35 @@
   .cmd-item{background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:6px}
   .cmd-name{font-size:15px;font-weight:700;color:var(--accent2)}
   .cmd-desc{font-size:var(--fs-xs);color:var(--text2);line-height:1.55}
+
+  /* 서버 로그 */
+  .slog-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:14px}
+  .slog-toolbar input[type="date"],
+  .slog-toolbar select,
+  .slog-toolbar input[type="search"]{
+    background:var(--bg3);border:1px solid var(--border2);border-radius:8px;color:var(--text);
+    font-family:var(--font);font-size:var(--fs-sm);padding:9px 12px;outline:none
+  }
+  .slog-toolbar input[type="search"]{min-width:200px;flex:1}
+  .slog-meta{font-size:var(--fs-xs);color:var(--text2);margin-bottom:10px}
+  .slog-viewer{
+    background:#0a0c10;border:1px solid var(--border);border-radius:10px;
+    max-height:calc(100vh - 260px);overflow:auto;padding:10px 0;font-size:var(--fs-2xs);line-height:1.55
+  }
+  .slog-row{display:grid;grid-template-columns:148px 72px minmax(100px,180px) 1fr;gap:8px;padding:5px 14px;border-bottom:1px solid rgba(255,255,255,0.04)}
+  .slog-row:hover{background:rgba(255,255,255,0.03)}
+  .slog-ts{color:var(--text2);font-variant-numeric:tabular-nums}
+  .slog-level{font-weight:700;letter-spacing:.3px}
+  .slog-level.ERROR,.slog-level.CRITICAL{color:var(--danger)}
+  .slog-level.WARNING{color:var(--warn)}
+  .slog-level.INFO{color:var(--accent)}
+  .slog-level.DEBUG{color:var(--text2)}
+  .slog-logger{color:var(--accent2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .slog-msg{color:var(--text);white-space:pre-wrap;word-break:break-word}
+  @media(max-width:900px){
+    .slog-row{grid-template-columns:1fr;gap:2px}
+    .slog-logger{white-space:normal}
+  }
 </style>
 </head>
 <body>
@@ -168,6 +201,10 @@
     <div class="nav-item" onclick="showTab('log')">
       <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
       매도 이력
+    </div>
+    <div class="nav-item" onclick="showTab('serverlog')">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+      서버 로그
     </div>
     <div class="nav-item" onclick="showTab('telegram')">
       <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
@@ -238,6 +275,7 @@
         <tbody id="holdingsBody">
           <tr><td colspan="9" style="text-align:center;color:var(--text2);padding:40px">데이터 로딩중…</td></tr>
         </tbody>
+        <tfoot id="holdingsFoot"></tfoot>
       </table>
     </div>
 
@@ -341,9 +379,44 @@
     <!-- 매도 이력 -->
     <div class="content" id="tab-log" style="display:none">
       <div class="panel">
-        <h2>📋 매도 이력</h2>
+        <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px">
+          <h2 style="margin:0">📋 매도 이력</h2>
+          <div class="slog-toolbar" style="margin:0">
+            <button type="button" class="btn log-filter-btn" data-filter="all" onclick="setSellLogFilter('all')">전체</button>
+            <button type="button" class="btn log-filter-btn primary" data-filter="success" onclick="setSellLogFilter('success')">성공만</button>
+            <button type="button" class="btn log-filter-btn" data-filter="fail" onclick="setSellLogFilter('fail')">실패만</button>
+            <button type="button" class="btn" onclick="loadLog(true)">↻ 새로고침</button>
+          </div>
+        </div>
         <p class="log-hint">이전 기록은 매입평균·매도단가가 저장되지 않아 매입평균·수익합계 등이 비어 있을 수 있습니다. 이후 매도부터 전 항목이 채워집니다.</p>
+        <div class="slog-meta" id="logFilterMeta">—</div>
         <div id="logList"><div style="color:var(--text2);text-align:center;padding:30px">매도 이력 없음</div></div>
+      </div>
+    </div>
+
+    <!-- 서버 로그 -->
+    <div class="content" id="tab-serverlog" style="display:none">
+      <div class="panel">
+        <h2>서버 로그</h2>
+        <div style="font-size:var(--fs-xs);color:var(--text2);margin-bottom:14px;line-height:1.7">
+          일자별 파일로 저장된 백엔드 로그입니다. (최대 30일 보관) 잔고 조회 실패 등 일시 오류도 여기서 확인할 수 있습니다.
+        </div>
+        <div class="slog-toolbar">
+          <input type="date" id="slogDate" onchange="loadServerLog()" />
+          <select id="slogLevel" onchange="loadServerLog()">
+            <option value="ALL">전체 레벨</option>
+            <option value="ERROR">ERROR</option>
+            <option value="WARNING">WARNING</option>
+            <option value="INFO">INFO</option>
+          </select>
+          <input type="search" id="slogQuery" placeholder="검색어 (예: 잔고조회)" onkeydown="if(event.key==='Enter')loadServerLog()" />
+          <button class="btn" onclick="loadServerLog()">조회</button>
+          <button class="btn" onclick="loadServerLogMore()" id="slogMoreBtn" style="display:none">더 보기</button>
+        </div>
+        <div class="slog-meta" id="slogMeta">—</div>
+        <div class="slog-viewer" id="slogViewer">
+          <div style="color:var(--text2);text-align:center;padding:30px">일자를 선택해 조회하세요</div>
+        </div>
       </div>
     </div>
 
@@ -450,18 +523,19 @@ function validHoldings(arr) {
 }
 
 function showTab(tab) {
-  ['dashboard','settings','atr','log','telegram'].forEach(t => {
+  ['dashboard','settings','atr','log','serverlog','telegram'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t===tab?'':'none';
   });
   const titles = {
     dashboard:'보유 종목 현황', settings:'매도 조건 설정',
-    atr:'ATR 트레일링 설정', log:'매도 이력', telegram:'텔레그램 명령어'
+    atr:'ATR 트레일링 설정', log:'매도 이력', serverlog:'서버 로그', telegram:'텔레그램 명령어'
   };
   document.getElementById('pageTitle').textContent = titles[tab];
   document.querySelectorAll('.nav-item').forEach((el,i) => {
-    el.classList.toggle('active', ['dashboard','settings','atr','log','telegram'][i]===tab);
+    el.classList.toggle('active', ['dashboard','settings','atr','log','serverlog','telegram'][i]===tab);
   });
   if (tab==='log') loadLog();
+  if (tab==='serverlog') initServerLogTab();
   if (tab==='settings') loadSettings();
   if (tab==='atr') loadAtr();
 }
@@ -733,6 +807,9 @@ function getAssetBreakdown(s) {
     credit_loan_krw: pick(b.credit_loan_krw, s && s.credit_loan_krw),
     deductions_krw: pick(b.deductions_krw, s && s.deductions_krw),
     fx_usd_krw: b.fx_usd_krw != null ? Number(b.fx_usd_krw) : (s && Number(s.usd_krw_rate)) || null,
+    domestic_tot_mode: b.domestic_tot_mode || '',
+    domestic_tot_evlu_krw: pick(b.domestic_tot_evlu_krw, s && s.hts_tot_evlu_krw),
+    total_method: b.total_method || '',
   };
 }
 
@@ -809,10 +886,25 @@ function renderAssetBreakdown(s) {
   }
   footHtml += footRow('(−) 미수매수 nrcvb_buy_amt', ab.nrcvb_buy_amt_krw, '-');
   footHtml += footRow('(−) 신용대출 tot_loan_amt', ab.credit_loan_krw, '-');
+  const totMode = ab.domestic_tot_mode || '';
+  if (totMode === 'stocks_plus_recv') {
+    footHtml += '<tr><td colspan="2" style="font-size:var(--fs-2xs);color:var(--text2);padding-top:6px">'
+      + '국내 tot_evlu(주식+국내 매도정산예정) + 해외주식·예수 + 해외 매도미결제 합산. '
+      + '국내 예수·국내 매도미결제는 tot에 반영된 정산예정과 중복되므로 총자산에 한 번만 반영됩니다.'
+      + '</td></tr>';
+  }
   if (Number(s.hts_tot_evlu_krw) > 0 || Number(s.hts_nass_krw) > 0) {
     footHtml += '<tr><td colspan="2" style="font-size:var(--fs-2xs);color:var(--text2);padding-top:8px">— 한투 API 참조 —</td></tr>';
     if (Number(s.hts_tot_evlu_krw) > 0) footHtml += '<tr><td>output2.tot_evlu_amt (국내)</td><td>' + fmt(s.hts_tot_evlu_krw) + '원</td></tr>';
     if (Number(s.hts_nass_krw) > 0) footHtml += '<tr><td>output2.nass_amt (순자산)</td><td>' + fmt(s.hts_nass_krw) + '원</td></tr>';
+    // tot_evlu가 예수 미포함인 날: tot만 보면 총자산이 예수만큼 낮게 보임
+    if (Number(s.hts_tot_evlu_krw) > 0 && ab.domestic_cash_krw > 0) {
+      const totPlusCash = Number(s.hts_tot_evlu_krw) + ab.domestic_cash_krw;
+      const gap = Math.abs(totPlusCash - (ab.domestic_stocks_krw + ab.domestic_cash_krw + ab.pending_sell_dom_krw));
+      if (Math.abs(Number(s.hts_tot_evlu_krw) - (ab.domestic_stocks_krw + ab.domestic_cash_krw)) > 1000) {
+        footHtml += '<tr><td style="font-size:var(--fs-2xs);color:var(--text2)">tot_evlu + 국내예수 (참조)</td><td style="font-size:var(--fs-2xs);color:var(--text2)">' + fmt(totPlusCash) + '원</td></tr>';
+      }
+    }
   }
   if (ab.overseas_cash_usd <= 0 && ab.overseas_cash_krw <= 0 && ab.overseas_stocks_krw > 0) {
     footHtml += '<tr><td colspan="2" style="font-size:var(--fs-2xs);color:var(--warn)">해외 예수금(USD) 미조회 — /debug로 frcr_dnca 확인</td></tr>';
@@ -821,7 +913,11 @@ function renderAssetBreakdown(s) {
   foot.innerHTML = footHtml;
 
   if (check) {
-    const expected = sub + ab.pending_sell_krw - ab.deductions_krw;
+    let expected = sub + ab.pending_sell_krw - ab.deductions_krw;
+    if (totMode === 'stocks_plus_recv' && ab.domestic_tot_evlu_krw > 0) {
+      expected = ab.domestic_tot_evlu_krw + ab.overseas_stocks_krw + ab.overseas_cash_krw
+        + ab.pending_sell_settlement_ov_krw - ab.pending_buy_settlement_krw - ab.deductions_krw;
+    }
     const diff = Math.abs(expected - total);
     if (sub > 0 && diff <= 1) {
       check.textContent = '✓ 항목 합계와 총자산 일치';
@@ -952,18 +1048,26 @@ function renderMetrics(s) {
 function renderHoldings(holdings) {
   if (!Array.isArray(holdings) || !validHoldings(holdings)) return;
   const tbody = document.getElementById('holdingsBody');
+  const tfoot = document.getElementById('holdingsFoot');
   const signals = holdings.filter(h=>h.should_sell).length;
   document.getElementById('m-signals').textContent = signals;
   if (!holdings.length) {
     tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text2);padding:40px">보유 종목 없음</td></tr>';
+    if (tfoot) tfoot.innerHTML = '';
     return;
   }
+  let sumKrw = 0;
+  let sumCostKrw = 0;
   tbody.innerHTML = holdings.map(h => {
     if (h.error) {
       return `<tr><td colspan="9" style="color:var(--warn);font-size:var(--fs-sm);padding:14px">
         ⚠ ${h.ticker} ${h.name||''} — 분석 실패: ${h.error} (잔고 수량 ${h.quantity||0}주)
       </td></tr>`;
     }
+    const evalAmt = holdingEvalAmounts(h, _lastFxRate);
+    const costAmt = holdingPurchaseAmounts(h, _lastFxRate);
+    sumKrw += Number(evalAmt.krw) || 0;
+    sumCostKrw += Number(costAmt.krw) || 0;
     const p = Number(h.profit_rate) || 0;
     const pColor = p>=0?'var(--accent)':'var(--danger)';
     const peak = h.peak_info||{};
@@ -997,6 +1101,18 @@ function renderHoldings(holdings) {
       <td><button class="btn danger" style="font-size:var(--fs-xs);padding:6px 12px" onclick="manualSell('${h.ticker}','${h.name}')">수동매도</button></td>
     </tr>`;
   }).join('');
+  if (tfoot) {
+    const pnl = sumKrw - sumCostKrw;
+    const pnlColor = pnl >= 0 ? 'var(--accent)' : 'var(--danger)';
+    const pnlTxt = (pnl >= 0 ? '+' : '') + fmt(Math.round(pnl)) + '원';
+    tfoot.innerHTML = `<tr>
+      <td class="holdings-sum-label" colspan="3">합계 (원화)</td>
+      <td class="holdings-sum-val" colspan="2">${fmt(Math.round(sumKrw))}원
+        <div style="font-size:var(--fs-2xs);font-weight:500;color:${pnlColor};margin-top:4px">평가손익 ${pnlTxt}</div>
+      </td>
+      <td colspan="4" style="font-size:var(--fs-2xs);color:var(--text2);font-weight:500">매입 ${fmt(Math.round(sumCostKrw))}원 · ${holdings.length}종목</td>
+    </tr>`;
+  }
 }
 
 async function loadAtr() {
@@ -1133,44 +1249,213 @@ async function saveSettings() {
   } catch(e) { alert('저장 실패: '+e.message); }
 }
 
-async function loadLog() {
+let _sellLogCache = null;
+let _sellLogFilter = 'success'; // all | success | fail
+
+function setSellLogFilter(mode) {
+  _sellLogFilter = mode === 'fail' ? 'fail' : (mode === 'all' ? 'all' : 'success');
+  document.querySelectorAll('.log-filter-btn').forEach(btn => {
+    const on = btn.getAttribute('data-filter') === _sellLogFilter;
+    btn.classList.toggle('primary', on);
+  });
+  renderSellLog();
+}
+
+function renderSellLog() {
+  const el = document.getElementById('logList');
+  const meta = document.getElementById('logFilterMeta');
+  const logs = Array.isArray(_sellLogCache) ? _sellLogCache : [];
+  if (!logs.length) {
+    if (meta) meta.textContent = '매도 이력 없음';
+    el.innerHTML = '<div style="color:var(--text2);text-align:center;padding:30px">매도 이력 없음</div>';
+    return;
+  }
+  const filtered = logs.filter(l => {
+    const ok = l.success !== false;
+    if (_sellLogFilter === 'success') return ok;
+    if (_sellLogFilter === 'fail') return !ok;
+    return true;
+  });
+  const label = _sellLogFilter === 'success' ? '성공' : (_sellLogFilter === 'fail' ? '실패' : '전체');
+  if (meta) meta.textContent = `${label} ${filtered.length.toLocaleString()}건 / 전체 ${logs.length.toLocaleString()}건`;
+  if (!filtered.length) {
+    el.innerHTML = `<div style="color:var(--text2);text-align:center;padding:30px">${label} 이력이 없습니다</div>`;
+    return;
+  }
+  const rows = filtered.map(l => {
+    const pColor = (l.profit_rate||0)>=0?'var(--accent)':'var(--danger)';
+    const time = l.checked_at ? new Date(l.checked_at).toLocaleString('ko-KR', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }) : '—';
+    const legacy = l.avg_price == null && l.profit_amount == null;
+    const status = l.success === false
+      ? `<span style="color:var(--danger)">실패</span>`
+      : '<span style="color:var(--accent)">완료</span>';
+    const profitKrwCell = l.profit_amount_krw != null
+      ? fmtLogKrw(l.profit_amount_krw) + (logCcy(l) === 'USD' && l.usd_krw_rate ? `<div class="log-legacy">≈${fmt(l.usd_krw_rate)}원/$</div>` : '')
+      : '—';
+    const vs = Number(l.vs_sell_pct);
+    const vsColor = !Number.isFinite(vs) ? 'var(--text2)' : (vs >= 0 ? 'var(--accent)' : 'var(--danger)');
+    const liveCell = l.live_price != null
+      ? `${fmtLogMoney(l, l.live_price)}${Number.isFinite(vs) ? `<div class="log-legacy" style="color:${vsColor};font-weight:600">${fmtLogPct(vs)} vs 매도</div>` : ''}`
+      : '—';
+    return `<tr>
+      <td>${time}</td>
+      <td class="log-name-cell"><b>${l.name||''}</b><br><span class="ticker-badge">${l.ticker||''}</span></td>
+      <td class="log-reason-cell">${l.reason_label||l.reason||'—'}${legacy ? '<div class="log-legacy">구버전 기록</div>' : ''}</td>
+      <td>${fmtLogMoney(l, l.avg_price)}</td>
+      <td>${fmtLogQty(l.quantity)}</td>
+      <td>${fmtLogMoney(l, l.sell_price)}</td>
+      <td>${liveCell}</td>
+      <td>${fmtLogMoney(l, l.sell_total)}</td>
+      <td style="color:${pColor};font-weight:600">${l.profit_rate != null ? fmtLogPct(l.profit_rate) : '—'}</td>
+      <td style="color:${pColor}">${l.profit_amount != null ? fmtLogProfit(l, l.profit_amount) : '—'}</td>
+      <td style="color:${pColor}">${profitKrwCell}</td>
+      <td>${status}${l.success===false && l.error ? `<div class="log-legacy">${l.error}</div>` : ''}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<div class="log-table-wrap"><table class="holdings-table log-table">
+    <thead><tr>
+      <th>일시</th><th>종목</th><th>사유</th>
+      <th>매입평균</th><th>수량</th><th>매도가</th><th>현재가</th><th>매도합계</th>
+      <th>수익률</th><th>수익합계</th><th>수익합계(원)</th><th>상태</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
+async function loadLog(forceRefresh) {
+  const el = document.getElementById('logList');
+  const meta = document.getElementById('logFilterMeta');
   try {
-    const logs = await fetch(API+'/portfolio/sell-log').then(r=>r.json());
-    const el = document.getElementById('logList');
-    if (!logs.length) { el.innerHTML = '<div style="color:var(--text2);text-align:center;padding:30px">매도 이력 없음</div>'; return; }
-    const rows = logs.map(l => {
-      const pColor = (l.profit_rate||0)>=0?'var(--accent)':'var(--danger)';
-      const time = l.checked_at ? new Date(l.checked_at).toLocaleString('ko-KR', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }) : '—';
-      const legacy = l.avg_price == null && l.profit_amount == null;
-      const status = l.success === false
-        ? `<span style="color:var(--danger)">실패</span>`
-        : '<span style="color:var(--accent)">완료</span>';
-      const profitKrwCell = l.profit_amount_krw != null
-        ? fmtLogKrw(l.profit_amount_krw) + (logCcy(l) === 'USD' && l.usd_krw_rate ? `<div class="log-legacy">≈${fmt(l.usd_krw_rate)}원/$</div>` : '')
-        : '—';
-      return `<tr>
-        <td>${time}</td>
-        <td class="log-name-cell"><b>${l.name||''}</b><br><span class="ticker-badge">${l.ticker||''}</span></td>
-        <td class="log-reason-cell">${l.reason_label||l.reason||'—'}${legacy ? '<div class="log-legacy">구버전 기록</div>' : ''}</td>
-        <td>${fmtLogMoney(l, l.avg_price)}</td>
-        <td>${fmtLogQty(l.quantity)}</td>
-        <td>${fmtLogMoney(l, l.sell_price)}</td>
-        <td>${fmtLogMoney(l, l.sell_total)}</td>
-        <td style="color:${pColor};font-weight:600">${l.profit_rate != null ? fmtLogPct(l.profit_rate) : '—'}</td>
-        <td style="color:${pColor}">${l.profit_amount != null ? fmtLogProfit(l, l.profit_amount) : '—'}</td>
-        <td style="color:${pColor}">${profitKrwCell}</td>
-        <td>${status}${l.success===false && l.error ? `<div class="log-legacy">${l.error}</div>` : ''}</td>
-      </tr>`;
-    }).join('');
-    el.innerHTML = `<div class="log-table-wrap"><table class="holdings-table log-table">
-      <thead><tr>
-        <th>일시</th><th>종목</th><th>사유</th>
-        <th>매입평균</th><th>수량</th><th>매도가</th><th>매도합계</th>
-        <th>수익률</th><th>수익합계</th><th>수익합계(원)</th><th>상태</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>`;
-  } catch(e) {}
+    if (forceRefresh || !Array.isArray(_sellLogCache)) {
+      if (meta) meta.textContent = '불러오는 중…';
+      _sellLogCache = await fetch(API+'/portfolio/sell-log').then(r=>{
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      });
+    }
+    document.querySelectorAll('.log-filter-btn').forEach(btn => {
+      btn.classList.toggle('primary', btn.getAttribute('data-filter') === _sellLogFilter);
+    });
+    renderSellLog();
+  } catch(e) {
+    if (meta) meta.textContent = '조회 실패';
+    el.innerHTML = `<div style="color:var(--danger);text-align:center;padding:30px">조회 실패: ${e.message||e}</div>`;
+  }
+}
+
+let _slogOffset = 0;
+const _SLOG_PAGE = 400;
+let _slogLoading = false;
+
+function todayLocalISO() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+async function initServerLogTab() {
+  const dateEl = document.getElementById('slogDate');
+  if (!dateEl.value) dateEl.value = todayLocalISO();
+  try {
+    const meta = await fetch(API + '/logs/dates').then(r => r.json());
+    if (meta && meta.today && !dateEl.value) dateEl.value = meta.today;
+  } catch (e) {}
+  loadServerLog();
+}
+
+function _escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function _renderSlogEntries(entries, append) {
+  const viewer = document.getElementById('slogViewer');
+  if (!entries.length && !append) {
+    viewer.innerHTML = '<div style="color:var(--text2);text-align:center;padding:30px">해당 일자 로그 없음</div>';
+    return;
+  }
+  const html = entries.map(e => {
+    const lv = _escapeHtml(e.level || 'INFO');
+    return `<div class="slog-row">
+      <div class="slog-ts">${_escapeHtml(e.ts || '')}</div>
+      <div class="slog-level ${lv}">${lv}</div>
+      <div class="slog-logger" title="${_escapeHtml(e.logger || '')}">${_escapeHtml(e.logger || '')}</div>
+      <div class="slog-msg">${_escapeHtml(e.message || e.raw || '')}</div>
+    </div>`;
+  }).join('');
+  if (append) viewer.insertAdjacentHTML('beforeend', html);
+  else viewer.innerHTML = html;
+}
+
+async function loadServerLog() {
+  if (_slogLoading) return;
+  _slogLoading = true;
+  _slogOffset = 0;
+  const date = document.getElementById('slogDate').value || todayLocalISO();
+  const level = document.getElementById('slogLevel').value || 'ALL';
+  const q = (document.getElementById('slogQuery').value || '').trim();
+  const meta = document.getElementById('slogMeta');
+  const moreBtn = document.getElementById('slogMoreBtn');
+  meta.textContent = '불러오는 중…';
+  moreBtn.style.display = 'none';
+  try {
+    const params = new URLSearchParams({
+      date, limit: String(_SLOG_PAGE), offset: '0', newest_first: 'true'
+    });
+    if (level && level !== 'ALL') params.set('level', level);
+    if (q) params.set('q', q);
+    const data = await fetch(API + '/logs/entries?' + params.toString()).then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    });
+    _renderSlogEntries(data.entries || [], false);
+    _slogOffset = (data.entries || []).length;
+    const shown = _slogOffset;
+    const total = data.total || 0;
+    meta.textContent = data.exists === false
+      ? `${date} — 로그 파일 없음 (배포 이후부터 일자별 저장)`
+      : `${date} · ${total.toLocaleString()}건 중 ${shown.toLocaleString()}건 표시 (최신순)`;
+    moreBtn.style.display = shown < total ? '' : 'none';
+  } catch (e) {
+    document.getElementById('slogViewer').innerHTML =
+      `<div style="color:var(--danger);text-align:center;padding:30px">조회 실패: ${_escapeHtml(e.message)}</div>`;
+    meta.textContent = '조회 실패';
+  } finally {
+    _slogLoading = false;
+  }
+}
+
+async function loadServerLogMore() {
+  if (_slogLoading) return;
+  _slogLoading = true;
+  const date = document.getElementById('slogDate').value || todayLocalISO();
+  const level = document.getElementById('slogLevel').value || 'ALL';
+  const q = (document.getElementById('slogQuery').value || '').trim();
+  const meta = document.getElementById('slogMeta');
+  const moreBtn = document.getElementById('slogMoreBtn');
+  try {
+    const params = new URLSearchParams({
+      date, limit: String(_SLOG_PAGE), offset: String(_slogOffset), newest_first: 'true'
+    });
+    if (level && level !== 'ALL') params.set('level', level);
+    if (q) params.set('q', q);
+    const data = await fetch(API + '/logs/entries?' + params.toString()).then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    });
+    const batch = data.entries || [];
+    _renderSlogEntries(batch, true);
+    _slogOffset += batch.length;
+    const total = data.total || 0;
+    meta.textContent = `${date} · ${total.toLocaleString()}건 중 ${_slogOffset.toLocaleString()}건 표시 (최신순)`;
+    moreBtn.style.display = _slogOffset < total ? '' : 'none';
+  } catch (e) {
+    meta.textContent = '더 보기 실패: ' + e.message;
+  } finally {
+    _slogLoading = false;
+  }
 }
 
 async function testTelegram() {

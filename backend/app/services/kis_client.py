@@ -2,10 +2,13 @@
 한국투자증권 API 클라이언트
 실전/모의 투자 모두 지원
 """
+import json
 import os
+import threading
 import time
 import requests
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from typing import Optional
@@ -16,9 +19,12 @@ from app.core.account_valuation import (
     overseas_from_inquire_balance_nasd,
     overseas_from_present_balance,
 )
+from app.core.paths import get_data_dir
 from app.core.portfolio_adjustment import parse_ccld_datetime_kst
 
 logger = logging.getLogger(__name__)
+
+_TOKEN_LOCK = threading.Lock()
 
 
 class KISBusinessError(Exception):
@@ -126,23 +132,100 @@ class KISApiClient:
     # ─────────────────────────────────────────
     # 인증
     # ─────────────────────────────────────────
+    def _token_path(self) -> Path:
+        return get_data_dir() / "kis_access_token.json"
+
+    def _load_token_file(self) -> bool:
+        path = self._token_path()
+        try:
+            if not path.is_file():
+                return False
+            data = json.loads(path.read_text(encoding="utf-8"))
+            token = str(data.get("access_token") or "").strip()
+            exp_raw = data.get("expires_at") or ""
+            if not token or not exp_raw:
+                return False
+            expires = datetime.fromisoformat(exp_raw)
+            # 만료 5분 전이면 재발급
+            if datetime.now() >= expires - timedelta(minutes=5):
+                return False
+            self._access_token = token
+            self._token_expires = expires
+            return True
+        except Exception as e:
+            logger.warning("토큰 파일 로드 실패: %s", e)
+            return False
+
+    def _save_token_file(self) -> None:
+        if not self._access_token or not self._token_expires:
+            return
+        path = self._token_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            payload = {
+                "access_token": self._access_token,
+                "expires_at": self._token_expires.isoformat(timespec="seconds"),
+            }
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as e:
+            logger.warning("토큰 파일 저장 실패: %s", e)
+
     def get_access_token(self) -> str:
         if self._access_token and self._token_expires and datetime.now() < self._token_expires:
             return self._access_token
 
-        url = f"{self.base_url}/oauth2/tokenP"
-        body = {
-            "grant_type": "client_credentials",
-            "appkey": self.app_key,
-            "appsecret": self.app_secret,
-        }
-        resp = requests.post(url, json=body, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        self._access_token = data["access_token"]
-        self._token_expires = datetime.now() + timedelta(hours=23)
-        logger.info("KIS 액세스 토큰 발급 완료")
-        return self._access_token
+        with _TOKEN_LOCK:
+            if self._access_token and self._token_expires and datetime.now() < self._token_expires:
+                return self._access_token
+            if self._load_token_file():
+                logger.info("KIS 액세스 토큰 파일 재사용")
+                return self._access_token  # type: ignore[return-value]
+
+            url = f"{self.base_url}/oauth2/tokenP"
+            body = {
+                "grant_type": "client_credentials",
+                "appkey": self.app_key,
+                "appsecret": self.app_secret,
+            }
+            last_err: Optional[Exception] = None
+            for attempt in range(4):
+                try:
+                    resp = requests.post(url, json=body, timeout=10)
+                    if resp.status_code == 403:
+                        # 한투: 동일 앱키 토큰 재발급 쿨다운(약 1분)
+                        wait_s = 15 * (attempt + 1)
+                        logger.warning(
+                            "KIS 토큰 발급 403 (시도 %s/4) — %ss 대기 후 재시도",
+                            attempt + 1,
+                            wait_s,
+                        )
+                        # 쿨다운 중에도 파일이 생기면 재사용
+                        if self._load_token_file():
+                            logger.info("대기 중 토큰 파일 재사용")
+                            return self._access_token  # type: ignore[return-value]
+                        time.sleep(wait_s)
+                        last_err = requests.HTTPError(
+                            f"403 Client Error: Forbidden for url: {url}",
+                            response=resp,
+                        )
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    self._access_token = data["access_token"]
+                    self._token_expires = datetime.now() + timedelta(hours=23)
+                    self._save_token_file()
+                    logger.info("KIS 액세스 토큰 발급 완료")
+                    return self._access_token
+                except requests.HTTPError as e:
+                    last_err = e
+                    if e.response is not None and e.response.status_code == 403:
+                        continue
+                    raise
+            if last_err:
+                raise last_err
+            raise RuntimeError("KIS 토큰 발급 실패")
 
     def _headers(self, tr_id: str, extra: dict = None) -> dict:
         h = {
@@ -191,6 +274,7 @@ class KISApiClient:
         profit_rate = _kis_float(item, "evlu_pfls_rt")
         if profit_rate == 0 and purchase_amount > 0:
             profit_rate = (eval_amount - purchase_amount) / purchase_amount * 100
+        thdt_buy_qty = _kis_int(item, "thdt_buyqty", "thdt_buy_qty")
         return {
             "ticker": ticker,
             "name": item.get("prdt_name") or ticker,
@@ -200,6 +284,7 @@ class KISApiClient:
             "profit_rate": profit_rate,
             "eval_amount": eval_amount,
             "purchase_amount": purchase_amount,
+            "thdt_buy_qty": thdt_buy_qty,
             "currency": "KRW",
         }
 
@@ -288,6 +373,23 @@ class KISApiClient:
         }
 
     def _get_domestic_holdings(self) -> list[dict]:
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                return self._get_domestic_holdings_once()
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                retryable = "500" in msg or "502" in msg or "503" in msg or "timeout" in msg.lower()
+                if not retryable or attempt >= 2:
+                    break
+                wait = 1.5 * (attempt + 1)
+                logger.warning("국내 잔고 조회 재시도 %s/3 (%.1fs): %s", attempt + 1, wait, e)
+                time.sleep(wait)
+        assert last_err is not None
+        raise last_err
+
+    def _get_domestic_holdings_once(self) -> list[dict]:
         acct, suffix = self._split_account()
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
         tr_id = "VTTC8434R" if self.is_mock else "TTTC8434R"
@@ -498,16 +600,15 @@ class KISApiClient:
     def refresh_overseas_account_valuation(self) -> OverseasValuation:
         """
         해외 총자산(원화): CTRP6504R 체결기준 → 실패 시 TTTS3012R NASD 1회.
-        (NASD/NYSE/AMEX 3회 합산은 중복·과대 계상 방지를 위해 사용하지 않음)
+        예수금 반영 지연을 피하기 위해 체결기준잔고는 매번 재조회한다.
         """
         valuation = OverseasValuation.empty()
-        present_data = self._last_overseas_present_raw
-        if not present_data:
-            try:
-                present_data = self._fetch_overseas_present_balance_raw()
-            except Exception as e:
-                logger.warning("해외 체결기준잔고 조회 실패: %s", e)
-                present_data = {}
+        present_data: dict = {}
+        try:
+            present_data = self._fetch_overseas_present_balance_raw()
+        except Exception as e:
+            logger.warning("해외 체결기준잔고 조회 실패: %s", e)
+            present_data = self._last_overseas_present_raw or {}
 
         if present_data:
             valuation = overseas_from_present_balance(present_data)
@@ -526,16 +627,21 @@ class KISApiClient:
             "source": valuation.source,
             "stocks_eval_krw": valuation.stocks_eval_krw,
             "usd_cash_krw": valuation.usd_cash_krw,
+            "usd_cash_usd": valuation.usd_cash_usd,
+            "ustl_buy_amt_krw": valuation.ustl_buy_amt_krw,
+            "ustl_sll_amt_krw": valuation.ustl_sll_amt_krw,
             "row_count": valuation.row_count,
             "detail": valuation.detail,
         }
         if valuation.total_krw > 0:
             logger.info(
-                "해외 총자산(%s): %s원 (주식 %s + USD예수 %s)",
+                "해외 총자산(%s): %s원 (주식 %s + USD예수 %s, 미결제매도 %s, 미결제매수 %s)",
                 valuation.source,
                 f"{valuation.total_krw:,.0f}",
                 f"{valuation.stocks_eval_krw:,.0f}",
                 f"{valuation.usd_cash_krw:,.0f}",
+                f"{valuation.ustl_sll_amt_krw:,.0f}",
+                f"{valuation.ustl_buy_amt_krw:,.0f}",
             )
         return valuation
 
@@ -907,26 +1013,53 @@ class KISApiClient:
 
     @staticmethod
     def _normalize_overseas_ccld_row(item: dict, ovrs_excg_cd: str) -> Optional[dict]:
-        ticker = (item.get("ovrs_pdno") or item.get("pdno") or "").strip()
-        if not ticker:
+        """inquire-ccnl(TTTS3035R) / 구 inquire-daily-ccld 응답 행 정규화."""
+        # 정정·취소 주문은 체결 보정에서 제외
+        rvse = str(item.get("rvse_cncl_dvsn") or item.get("rvse_cncl_dvsn_cd") or "").strip()
+        if rvse in ("01", "02"):
             return None
-        qty = _kis_int(item, "tot_ccld_qty", "ft_ccld_qty", "ccld_qty")
+        ticker = (item.get("ovrs_pdno") or item.get("pdno") or "").strip()
+        if not ticker or ticker == "%":
+            return None
+        qty = _kis_int(item, "ft_ccld_qty", "tot_ccld_qty", "ccld_qty")
         if qty <= 0:
             return None
-        ord_dt = item.get("ord_dt", "")
-        tm = item.get("ord_tmd") or item.get("ccld_tmd") or item.get("infm_tmd") or ""
+        ord_dt = item.get("ord_dt") or item.get("dmst_ord_dt") or ""
+        tm = (
+            item.get("ord_tmd")
+            or item.get("thco_ord_tmd")
+            or item.get("ccld_tmd")
+            or item.get("infm_tmd")
+            or ""
+        )
         ccld_kst = parse_ccld_datetime_kst(ord_dt, tm)
         amt = _kis_float(
             item,
+            "ft_ccld_amt3",
             "frcr_ccld_amt2",
             "frcr_ccld_amt",
             "tot_ccld_amt",
             "ccld_amt",
         )
-        if amt <= 0:
-            pr = _kis_float(item, "ft_ccld_unpr", "avg_prvs", "ovrs_ccld_unpr")
-            amt = pr * qty
+        price = _kis_float(
+            item,
+            "ft_ccld_unpr3",
+            "ft_ccld_unpr",
+            "avg_prvs",
+            "ovrs_ccld_unpr",
+        )
+        if amt <= 0 and price > 0:
+            amt = price * qty
         side = (item.get("sll_buy_dvsn_cd") or "").strip()
+        ocd = (item.get("ovrs_excg_cd") or ovrs_excg_cd or "NASD").strip().upper()
+        if ocd in ("%", ""):
+            ocd = "NASD"
+        elif ocd in ("NAS",):
+            ocd = "NASD"
+        elif ocd in ("NYS",):
+            ocd = "NYSE"
+        elif ocd in ("AMS",):
+            ocd = "AMEX"
         return {
             "region": "US",
             "date": ord_dt,
@@ -934,12 +1067,12 @@ class KISApiClient:
             "name": item.get("prdt_name") or item.get("ovrs_item_name") or ticker,
             "type": "BUY" if side == "02" else "SELL",
             "quantity": qty,
-            "price": _kis_float(item, "ft_ccld_unpr", "avg_prvs", "ovrs_ccld_unpr"),
+            "price": price,
             "amount": amt,
             "currency": "USD",
             "fx_rate": _kis_float(item, "bass_exrt", "frst_bltn_exrt", "exrt"),
             "ccld_at_kst": ccld_kst,
-            "ovrs_excg_cd": (item.get("ovrs_excg_cd") or ovrs_excg_cd or "NASD").strip().upper(),
+            "ovrs_excg_cd": ocd,
             "source": "api_overseas",
         }
 
@@ -989,66 +1122,68 @@ class KISApiClient:
             break
         return trades
 
-    def _fetch_overseas_daily_ccld(self, start: str, end: str, ovrs_excg_cd: str) -> list[dict]:
+    def _fetch_overseas_ccnl(self, start: str, end: str, ovrs_excg_cd: str) -> list[dict]:
+        """
+        해외주식 주문체결내역 [v1_해외주식-007] inquire-ccnl.
+        TR: 실전 TTTS3035R / 모의 VTTS3035R
+        ovrs_excg_cd: NASD|NYSE|AMEX 또는 '%' (전거래소, 실전만)
+        """
         acct, suffix = self._split_account()
-        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-daily-ccld"
-        tr_candidates = (
-            ["VTTT3035R", "VTTT3018R", "JTTT3035R"]
-            if self.is_mock
-            else ["TTTS3035R", "TTTS3018R", "JTTT3035R"]
-        )
+        url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-ccnl"
+        tr_id = "VTTS3035R" if self.is_mock else "TTTS3035R"
+        # 모의는 PDNO="" · OVRS_EXCG_CD="" 만 허용. 실전 전종목은 PDNO='%'
+        pdno = "" if self.is_mock else "%"
+        excg = "" if self.is_mock else (ovrs_excg_cd or "%")
         params = {
             "CANO": acct,
             "ACNT_PRDT_CD": suffix,
-            "OVRS_EXCG_CD": ovrs_excg_cd,
-            "INQR_STRT_DT": start,
-            "INQR_END_DT": end,
-            "SLL_BUY_DVSN_CD": "00",
-            "INQR_DVSN": "00",
-            "PDNO": "",
-            "CCLD_DVSN": "01",
+            "PDNO": pdno,
+            "ORD_STRT_DT": start,
+            "ORD_END_DT": end,
+            "SLL_BUY_DVSN": "00",
+            "CCLD_NCCS_DVSN": "01",
+            "OVRS_EXCG_CD": excg,
+            "SORT_SQN": "DS",
+            "ORD_DT": "",
             "ORD_GNO_BRNO": "",
             "ODNO": "",
-            "INQR_DVSN_3": "00",
-            "INQR_DVSN_1": "",
-            "CTX_AREA_FK100": "",
-            "CTX_AREA_NK100": "",
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": "",
         }
-        last_err: Optional[Exception] = None
-        for tr_id in tr_candidates:
-            trades: list[dict] = []
-            tr_cont = ""
-            fk100, nk100 = "", ""
-            try:
-                for _ in range(20):
-                    params["CTX_AREA_FK100"] = fk100
-                    params["CTX_AREA_NK100"] = nk100
-                    resp = requests.get(
-                        url,
-                        headers={**self._headers(tr_id), "tr_cont": tr_cont},
-                        params=params,
-                        timeout=15,
-                    )
-                    resp.raise_for_status()
-                    data = _kiss_check_rt_cd(resp.json())
-                    for item in data.get("output1", []) or []:
-                        row = self._normalize_overseas_ccld_row(item, ovrs_excg_cd)
-                        if row:
-                            row["source"] = "api_overseas"
-                            trades.append(row)
-                    fk100 = (data.get("ctx_area_fk100") or "").strip()
-                    nk100 = (data.get("ctx_area_nk100") or "").strip()
-                    tr_cont = (resp.headers.get("tr_cont") or data.get("tr_cont") or "").strip()
-                    if tr_cont in ("M", "F") and (fk100 or nk100):
-                        continue
-                    break
-                return trades
-            except Exception as e:
-                last_err = e
-                logger.debug("해외 체결 TR %s (%s) 실패: %s", tr_id, ovrs_excg_cd, e)
-        if last_err:
-            raise last_err
-        return []
+        trades: list[dict] = []
+        tr_cont = ""
+        fk200, nk200 = "", ""
+        for _ in range(20):
+            params["CTX_AREA_FK200"] = fk200
+            params["CTX_AREA_NK200"] = nk200
+            resp = requests.get(
+                url,
+                headers={**self._headers(tr_id), "tr_cont": tr_cont},
+                params=params,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = _kiss_check_rt_cd(resp.json())
+            rows = data.get("output") or data.get("output1") or []
+            if isinstance(rows, dict):
+                rows = [rows]
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                row = self._normalize_overseas_ccld_row(item, excg or ovrs_excg_cd or "NASD")
+                if row:
+                    trades.append(row)
+            fk200 = (data.get("ctx_area_fk200") or "").strip()
+            nk200 = (data.get("ctx_area_nk200") or "").strip()
+            tr_cont = (resp.headers.get("tr_cont") or data.get("tr_cont") or "").strip()
+            if tr_cont in ("M", "F") and (fk200 or nk200):
+                continue
+            break
+        return trades
+
+    def _fetch_overseas_daily_ccld(self, start: str, end: str, ovrs_excg_cd: str) -> list[dict]:
+        """하위 호환 이름 — inquire-ccnl 사용."""
+        return self._fetch_overseas_ccnl(start, end, ovrs_excg_cd)
 
     def get_trade_history(self, days: int = 90) -> list[dict]:
         """국내 체결 내역 (하위 호환)."""
@@ -1061,7 +1196,7 @@ class KISApiClient:
             return []
 
     def get_combined_trade_history(self, days: int = 7) -> list[dict]:
-        """국내 + 미국(거래소별) 체결 내역 통합."""
+        """국내 + 해외(미국) 체결 내역 통합."""
         end = datetime.now().strftime("%Y%m%d")
         start = (datetime.now() - timedelta(days=max(days, 1))).strftime("%Y%m%d")
         merged: list[dict] = []
@@ -1069,11 +1204,24 @@ class KISApiClient:
             merged.extend(self._fetch_domestic_daily_ccld(start, end))
         except Exception as e:
             logger.warning("국내 체결내역 조회 실패: %s", e)
-        for ovrs in ("NASD", "NYSE", "AMEX"):
+
+        overseas: list[dict] = []
+        if self.is_mock:
             try:
-                merged.extend(self._fetch_overseas_daily_ccld(start, end, ovrs))
+                overseas = self._fetch_overseas_ccnl(start, end, "")
             except Exception as e:
-                logger.warning("해외 체결내역(%s) 조회 실패: %s", ovrs, e)
+                logger.warning("해외 체결내역(모의) 조회 실패: %s", e)
+        else:
+            try:
+                overseas = self._fetch_overseas_ccnl(start, end, "%")
+            except Exception as e:
+                logger.warning("해외 체결내역(전거래소) 조회 실패, 거래소별 재시도: %s", e)
+                for ovrs in ("NASD", "NYSE", "AMEX"):
+                    try:
+                        overseas.extend(self._fetch_overseas_ccnl(start, end, ovrs))
+                    except Exception as e2:
+                        logger.warning("해외 체결내역(%s) 조회 실패: %s", ovrs, e2)
+        merged.extend(overseas)
         return merged
 
 
